@@ -285,19 +285,19 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     }
 
     /**
-     * Removes the calling thread from the active merge threads.
+     * Removes the merge from the pending merges.
      */
-    synchronized void removeMergeThread() {
-        MergeTask currentTask = localThreadMerge.get();
+    synchronized void removePendingMerge() {
+        MergeTask currentMerge = localThreadMerge.get();
         // Paranoia: don't trust Thread.equals:
         for (int i = 0; i < pendingMerges.size(); i++) {
-            if (pendingMerges.get(i) == currentTask) {
+            if (pendingMerges.get(i) == currentMerge) {
                 pendingMerges.remove(i);
                 return;
             }
         }
 
-        assert false : "merge thread " + currentThread + " was not found";
+        assert false : "merge " + currentMerge + " was not found";
     }
 
     @Override
@@ -420,17 +420,18 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                     mergeStartNS = now;
                 }
                 message.append('\n');
-                message.append(
-                        String.format(
-                                Locale.ROOT,
-                                "merge thread %s estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s\n",
-                                mergeThread.getName(),
-                                bytesToMB(merge.estimatedMergeBytes),
-                                bytesToMB(rateLimiter.getTotalBytesWritten()),
-                                nsToSec(now - mergeStartNS),
-                                nsToSec(rateLimiter.getTotalStoppedNS()),
-                                nsToSec(rateLimiter.getTotalPausedNS()),
-                                rateToString(rateLimiter.getMBPerSec())));
+                // TODO: Fix
+//                message.append(
+//                        String.format(
+//                                Locale.ROOT,
+//                                "merge thread %s estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s\n",
+//                                mergeThread.getName(),
+//                                bytesToMB(merge.estimatedMergeBytes),
+//                                bytesToMB(rateLimiter.getTotalBytesWritten()),
+//                                nsToSec(now - mergeStartNS),
+//                                nsToSec(rateLimiter.getTotalStoppedNS()),
+//                                nsToSec(rateLimiter.getTotalPausedNS()),
+//                                rateToString(rateLimiter.getMBPerSec())));
 
                 if (newMBPerSec != curMBPerSec) {
                     if (newMBPerSec == 0.0) {
@@ -725,7 +726,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         } catch (IOException ioe) {
             throw new UncheckedIOException(ioe);
         } finally {
-            removeMergeThread();
+            removePendingMerge();
             updateMergeThreads();
             // In case we had stalled indexing, we can now wake up
             // and possibly unstall:
