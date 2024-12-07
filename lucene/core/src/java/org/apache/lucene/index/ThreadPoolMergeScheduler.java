@@ -345,17 +345,17 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         // process of stopping (ie have an active merge):
         final List<MergeTask> activeMerges = new ArrayList<>();
 
-        int threadIdx = 0;
-        while (threadIdx < pendingMerges.size()) {
-            final MergeTask mergeTask = pendingMerges.get(threadIdx);
-            // TODO: Fix!!!!!!!!!
-//            if (!mergeThread.isAlive()) {
-//                // Prune any dead threads
-//                mergeThreads.remove(threadIdx);
-//                continue;
-//            }
+        int mergeIdx = 0;
+        while (mergeIdx < pendingMerges.size()) {
+            final MergeTask mergeTask = pendingMerges.get(mergeIdx);
+            // TODO: MAYBE WE SHOULD JUST BE CLEAR ABOUT REMOVING MERGES INSTEAD OF THIS GC THING
+            if (!mergeTask.isPending()) {
+                // Prune any dead threads
+                pendingMerges.remove(mergeIdx);
+                continue;
+            }
             activeMerges.add(mergeTask);
-            threadIdx++;
+            mergeIdx++;
         }
 
         // Sort the merge threads, largest first:
@@ -365,10 +365,10 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
 
         int bigMergeCount = 0;
 
-        for (threadIdx = activeMergeCount - 1; threadIdx >= 0; threadIdx--) {
-            MergeTask mergeTask = activeMerges.get(threadIdx);
+        for (mergeIdx = activeMergeCount - 1; mergeIdx >= 0; mergeIdx--) {
+            MergeTask mergeTask = activeMerges.get(mergeIdx);
             if (mergeTask.merge.estimatedMergeBytes > MIN_BIG_MERGE_MB * 1024 * 1024) {
-                bigMergeCount = 1 + threadIdx;
+                bigMergeCount = 1 + mergeIdx;
                 break;
             }
         }
@@ -388,13 +388,13 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             message = null;
         }
 
-        for (threadIdx = 0; threadIdx < activeMergeCount; threadIdx++) {
-            MergeTask mergeThread = activeMerges.get(threadIdx);
+        for (mergeIdx = 0; mergeIdx < activeMergeCount; mergeIdx++) {
+            MergeTask mergeThread = activeMerges.get(mergeIdx);
 
             OneMerge merge = mergeThread.merge;
 
             // pause the thread if maxThreadCount is smaller than the number of merge threads.
-            final boolean doPause = threadIdx < bigMergeCount - maxThreadCount;
+            final boolean doPause = mergeIdx < bigMergeCount - maxThreadCount;
 
             double newMBPerSec;
             if (doPause) {
@@ -548,7 +548,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     public synchronized int pendingMergeCount() {
         int count = 0;
         for (MergeTask pendingMerge : pendingMerges) {
-            if (!pendingMerge.isDone() && !pendingMerge.merge.isAborted()) {
+            if (pendingMerge.isPending() && !pendingMerge.merge.isAborted()) {
                 count++;
             }
         }
@@ -656,6 +656,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             // thread to prevent creation of new segments,
             // until merging has caught up:
 
+            // TODO: MUST FIX THIS LOGIC
             if (pendingMerges.contains(Thread.currentThread())) {
                 // Never stall a merge thread since this blocks the thread from
                 // finishing and calling updateMergeThreads, and blocking it
@@ -715,7 +716,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         // the merge call as well as the merge thread handling in the finally
         // block must be sync'd on CMS otherwise stalling decisions might cause
         // us to miss pending merges
-        assert pendingMerges.contains(Thread.currentThread()) : "caller is not a merge thread";
+        assert pendingMerges.contains(localThreadMerge.get()) : "caller is not a merge thread";
         // Let CMS run new merges if necessary:
         try {
             merge(mergeSource, MergeTrigger.MERGE_FINISHED);
@@ -762,8 +763,8 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             mergeDoneLatch.await();
         }
 
-        private boolean isDone() {
-            return mergeDoneLatch.getCount() == 0;
+        private boolean isPending() {
+            return mergeDoneLatch.getCount() != 0;
         }
 
         @Override
@@ -857,7 +858,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         double mergeMB = bytesToMB(merge.estimatedMergeBytes);
         for (MergeTask pendingMerge : pendingMerges) {
             long mergeStartNS = pendingMerge.merge.mergeStartNS;
-            if (!pendingMerge.isDone()
+            if (pendingMerge.isPending()
                     && pendingMerge.merge != merge
                     && mergeStartNS != -1
                     && pendingMerge.merge.estimatedMergeBytes >= MIN_BIG_MERGE_MB * 1024 * 1024
