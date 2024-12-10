@@ -53,7 +53,7 @@ import org.apache.lucene.util.ThreadInterruptedException;
  * disk (or similar). If you have a spinning disk and want to maximize performance, use {@link
  * #setDefaultMaxMergesAndThreads(boolean)}.
  */
-public class ThreadPoolMergeScheduler extends MergeScheduler {
+public abstract class ThreadPoolMergeScheduler extends MergeScheduler {
 
     /**
      * Dynamic default for {@code maxThreadCount} and {@code maxMergeCount}, based on CPU core count.
@@ -218,7 +218,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
      */
     public synchronized void setForceMergeMBPerSec(double v) {
         forceMergeMBPerSec = v;
-        updateMergeThreads();
+        updatePendingMerge();
     }
 
     /**
@@ -236,7 +236,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     public synchronized void enableAutoIOThrottle() {
         doAutoIOThrottle = true;
         targetMBPerSec = START_MB_PER_SEC;
-        updateMergeThreads();
+        updatePendingMerge();
     }
 
     /**
@@ -246,7 +246,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
      */
     public synchronized void disableAutoIOThrottle() {
         doAutoIOThrottle = false;
-        updateMergeThreads();
+        updatePendingMerge();
     }
 
     /**
@@ -336,7 +336,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
      * merge threads by their merge size in descending order and then pauses/unpauses threads from
      * first to last -- that way, smaller merges are guaranteed to run before larger ones.
      */
-    protected synchronized void updateMergeThreads() {
+    protected synchronized void updatePendingMerge() {
 
         // Only look at threads that are alive & not in the
         // process of stopping (ie have an active merge):
@@ -345,7 +345,6 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         int mergeIdx = 0;
         while (mergeIdx < pendingMerges.size()) {
             final MergeTask mergeTask = pendingMerges.get(mergeIdx);
-            // TODO: MAYBE WE SHOULD JUST BE CLEAR ABOUT REMOVING MERGES INSTEAD OF THIS GC THING
             if (!mergeTask.isPending()) {
                 // Prune any dead threads
                 pendingMerges.remove(mergeIdx);
@@ -565,7 +564,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         if (trigger == MergeTrigger.CLOSING) {
             // Disable throttling on close:
             targetMBPerSec = MAX_MERGE_MB_PER_SEC;
-            updateMergeThreads();
+            updatePendingMerge();
         }
 
         // First, quickly run through the newly proposed merges
@@ -599,7 +598,6 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             boolean success = false;
             try {
                 final MergeTask newMergeTask = new MergeTask(mergeSource, merge, getMergeTaskName(mergeSource, merge));
-                // TODO: Do we also need to split out "active" merges?
                 pendingMerges.add(newMergeTask);
 
                 updateIOThrottle(newMergeTask.merge, newMergeTask.rateLimiter);
@@ -609,7 +607,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                 }
 
                 dispatchMerge(newMergeTask);
-                updateMergeThreads();
+                updatePendingMerge();
 
                 success = true;
             } finally {
@@ -620,10 +618,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         }
     }
 
-    private void dispatchMerge(MergeTask newMergeTask) {
-        // TODO: Implement
-
-    }
+    abstract protected void dispatchMerge(MergeTask newMergeTask) throws IOException;
 
     /**
      * This is invoked by {@link #merge} to possibly stall the incoming thread when there are too many
@@ -716,7 +711,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             throw new UncheckedIOException(ioe);
         } finally {
             removePendingMerge(mergeTask);
-            updateMergeThreads();
+            updatePendingMerge();
             // In case we had stalled indexing, we can now wake up
             // and possibly unstall:
             notifyAll();
