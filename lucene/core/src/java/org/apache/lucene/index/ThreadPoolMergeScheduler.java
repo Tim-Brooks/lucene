@@ -89,9 +89,9 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     private int maxMergeCount = AUTO_DETECT_MERGES_AND_THREADS;
 
     /**
-     * How many {@link MergeTask}s have kicked off (this is use to name them).
+     * How many {@link MergeTask}s have kicked off (this is used to name them).
      */
-    protected int mergeThreadCount;
+    protected int mergeTaskCount;
 
     /**
      * Floor for IO write rate limit (we will never go any lower than this)
@@ -287,17 +287,14 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     /**
      * Removes the merge from the pending merges.
      */
-    synchronized void removePendingMerge() {
-        MergeTask currentMerge = localThreadMerge.get();
+    synchronized void removePendingMerge(MergeTask mergeToRemove) {
         // Paranoia: don't trust Thread.equals:
         for (int i = 0; i < pendingMerges.size(); i++) {
-            if (pendingMerges.get(i) == currentMerge) {
+            if (pendingMerges.get(i) == mergeToRemove) {
                 pendingMerges.remove(i);
                 return;
             }
         }
-
-        assert false : "merge " + currentMerge + " was not found";
     }
 
     @Override
@@ -389,9 +386,9 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         }
 
         for (mergeIdx = 0; mergeIdx < activeMergeCount; mergeIdx++) {
-            MergeTask mergeThread = activeMerges.get(mergeIdx);
+            MergeTask mergeTask = activeMerges.get(mergeIdx);
 
-            OneMerge merge = mergeThread.merge;
+            OneMerge merge = mergeTask.merge;
 
             // pause the thread if maxThreadCount is smaller than the number of merge threads.
             final boolean doPause = mergeIdx < bigMergeCount - maxThreadCount;
@@ -410,7 +407,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                 newMBPerSec = targetMBPerSec;
             }
 
-            MergeRateLimiter rateLimiter = mergeThread.rateLimiter;
+            MergeRateLimiter rateLimiter = mergeTask.rateLimiter;
             double curMBPerSec = rateLimiter.getMBPerSec();
 
             if (verbose()) {
@@ -420,18 +417,17 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                     mergeStartNS = now;
                 }
                 message.append('\n');
-                // TODO: Fix
-//                message.append(
-//                        String.format(
-//                                Locale.ROOT,
-//                                "merge thread %s estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s\n",
-//                                mergeThread.getName(),
-//                                bytesToMB(merge.estimatedMergeBytes),
-//                                bytesToMB(rateLimiter.getTotalBytesWritten()),
-//                                nsToSec(now - mergeStartNS),
-//                                nsToSec(rateLimiter.getTotalStoppedNS()),
-//                                nsToSec(rateLimiter.getTotalPausedNS()),
-//                                rateToString(rateLimiter.getMBPerSec())));
+                message.append(
+                        String.format(
+                                Locale.ROOT,
+                                "merge task %s estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s\n",
+                                mergeTask.getName(),
+                                bytesToMB(merge.estimatedMergeBytes),
+                                bytesToMB(rateLimiter.getTotalBytesWritten()),
+                                nsToSec(now - mergeStartNS),
+                                nsToSec(rateLimiter.getTotalStoppedNS()),
+                                nsToSec(rateLimiter.getTotalPausedNS()),
+                                rateToString(rateLimiter.getMBPerSec())));
 
                 if (newMBPerSec != curMBPerSec) {
                     if (newMBPerSec == 0.0) {
@@ -510,13 +506,12 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             while (true) {
                 MergeTask toSync = null;
                 synchronized (this) {
-                    // TODO: Need to unset
                     MergeTask localThreadMerge = this.localThreadMerge.get();
-                    for (MergeTask t : pendingMerges) {
+                    for (MergeTask task : pendingMerges) {
                         // In case a merge thread is calling us, don't try to sync on
                         // itself, since that will never finish!
-                        if (t != localThreadMerge) {
-                            toSync = t;
+                        if (task != localThreadMerge) {
+                            toSync = task;
                             break;
                         }
                     }
@@ -603,16 +598,14 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
 
             boolean success = false;
             try {
-                final MergeTask newMergeTask = new MergeTask(mergeSource, merge);
+                final MergeTask newMergeTask = new MergeTask(mergeSource, merge, getMergeTaskName(mergeSource, merge));
                 // TODO: Do we also need to split out "active" merges?
                 pendingMerges.add(newMergeTask);
 
-                // TODO: Does IOThrottle need to move AFTER the actual merge has started?
                 updateIOThrottle(newMergeTask.merge, newMergeTask.rateLimiter);
 
                 if (verbose()) {
-                    // TODO: Move long elsewhere
-//                    message("    launch new thread [" + newMergeThread.getName() + "]");
+                    message("    schedule new merge task [" + newMergeTask.getName() + "]");
                 }
 
                 dispatchMerge(newMergeTask);
@@ -656,8 +649,8 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             // thread to prevent creation of new segments,
             // until merging has caught up:
 
-            // TODO: MUST FIX THIS LOGIC
-            if (pendingMerges.contains(Thread.currentThread())) {
+            boolean isOnMergeThread = localThreadMerge.get() != null;
+            if (isOnMergeThread) {
                 // Never stall a merge thread since this blocks the thread from
                 // finishing and calling updateMergeThreads, and blocking it
                 // accomplishes nothing anyway (it's not really a segment producer):
@@ -701,22 +694,17 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
     }
 
     /**
-     * Create and return a new MergeThread
+     * Create and return a name for a new merge task
      */
-    protected synchronized MergeTask getMergeThread(MergeSource mergeSource, OneMerge merge)
-            throws IOException {
-        final MergeTask thread = new MergeTask(mergeSource, merge);
-        // TODO: Fix
-//        thread.setDaemon(true);
-//        thread.setName("Lucene Merge Thread #" + mergeThreadCount++);
-        return thread;
+    protected synchronized String getMergeTaskName(MergeSource mergeSource, OneMerge merge) {
+        return "Lucene Merge #" + mergeTaskCount++;
     }
 
-    synchronized void runOnMergeFinished(MergeSource mergeSource) {
+    synchronized void runOnMergeFinished(MergeSource mergeSource, MergeTask mergeTask) {
         // the merge call as well as the merge thread handling in the finally
         // block must be sync'd on CMS otherwise stalling decisions might cause
         // us to miss pending merges
-        assert pendingMerges.contains(localThreadMerge.get()) : "caller is not a merge thread";
+        assert pendingMerges.contains(mergeTask) : "caller is not a merge thread";
         // Let CMS run new merges if necessary:
         try {
             merge(mergeSource, MergeTrigger.MERGE_FINISHED);
@@ -727,7 +715,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         } catch (IOException ioe) {
             throw new UncheckedIOException(ioe);
         } finally {
-            removePendingMerge();
+            removePendingMerge(mergeTask);
             updateMergeThreads();
             // In case we had stalled indexing, we can now wake up
             // and possibly unstall:
@@ -742,15 +730,17 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
         final MergeSource mergeSource;
         final OneMerge merge;
         final MergeRateLimiter rateLimiter;
+        private final String name;
         final CountDownLatch mergeDoneLatch = new CountDownLatch(1);
 
         /**
          * Sole constructor.
          */
-        public MergeTask(MergeSource mergeSource, OneMerge merge) {
+        public MergeTask(MergeSource mergeSource, OneMerge merge, String name) {
             this.mergeSource = mergeSource;
             this.merge = merge;
             this.rateLimiter = new MergeRateLimiter(merge.getMergeProgress());
+            this.name = name;
         }
 
         @Override
@@ -772,7 +762,7 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
             try {
                 localThreadMerge.set(this);
                 if (verbose()) {
-                    message(String.format(Locale.ROOT, "merge thread %s start", Thread.currentThread().getName()));
+                    message(String.format(Locale.ROOT, "merge task %s start", getName()));
                 }
 
                 doMerge(mergeSource, merge);
@@ -780,8 +770,8 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                     message(
                             String.format(
                                     Locale.ROOT,
-                                    "merge thread %s merge segment [%s] done estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s",
-                                    Thread.currentThread().getName(),
+                                    "merge task %s merge segment [%s] done estSize=%.1f MB (written=%.1f MB) runTime=%.1fs (stopped=%.1fs, paused=%.1fs) rate=%s",
+                                    getName(),
                                     getSegmentName(merge),
                                     bytesToMB(merge.estimatedMergeBytes),
                                     bytesToMB(rateLimiter.getTotalBytesWritten()),
@@ -791,10 +781,10 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                                     rateToString(rateLimiter.getMBPerSec())));
                 }
 
-                runOnMergeFinished(mergeSource);
+                runOnMergeFinished(mergeSource, this);
 
                 if (verbose()) {
-                    message(String.format(Locale.ROOT, "merge thread %s end", Thread.currentThread().getName()));
+                    message(String.format(Locale.ROOT, "merge task %s end", getName()));
                 }
             } catch (Throwable exc) {
                 if (exc instanceof MergePolicy.MergeAbortedException) {
@@ -808,6 +798,10 @@ public class ThreadPoolMergeScheduler extends MergeScheduler {
                 localThreadMerge.remove();
                 mergeDoneLatch.countDown();
             }
+        }
+
+        private String getName() {
+            return name;
         }
     }
 
