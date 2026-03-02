@@ -5229,4 +5229,43 @@ public class TestIndexWriter extends LuceneTestCase {
     writer.close();
     dir.close();
   }
+
+  public void testBatchAddDocumentsWithParentField() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    String parentFieldName = "__parent";
+    iwc.setParentField(parentFieldName);
+    IndexWriter writer = new IndexWriter(dir, iwc);
+
+    // First, add a regular document block (with parent) to create a segment with the parent field
+    List<Document> block = new ArrayList<>();
+    Document child = new Document();
+    child.add(newStringField("type", "child", Field.Store.YES));
+    block.add(child);
+    Document parent = new Document();
+    parent.add(newStringField("type", "parent", Field.Store.YES));
+    block.add(parent);
+    writer.addDocuments(block);
+    writer.flush();
+
+    // Now batch-add independent documents — this must also produce a segment with the parent field
+    List<Iterable<? extends IndexableField>> batch = new ArrayList<>();
+    for (int i = 0; i < 5; i++) {
+      Document doc = new Document();
+      doc.add(newStringField("id", Integer.toString(i), Field.Store.YES));
+      batch.add(doc);
+    }
+    writer.batchAddDocuments(batch);
+    writer.commit();
+
+    // Verify that reading across both segments doesn't throw (parent field must be consistent)
+    DirectoryReader reader = DirectoryReader.open(dir);
+    assertEquals(7, reader.numDocs()); // 2 from block + 5 from batch
+    // getMergedFieldInfos validates parent field consistency across segments
+    FieldInfos merged = FieldInfos.getMergedFieldInfos(reader);
+    assertNotNull(merged.fieldInfo(parentFieldName));
+    reader.close();
+    writer.close();
+    dir.close();
+  }
 }
