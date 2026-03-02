@@ -316,6 +316,10 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
       boolean allDocsIndexed = false;
       try {
         for (Iterable<? extends IndexableField> doc : docs) {
+          // Each document is independent (its own root), so add the parent field to every doc
+          if (parentField != null) {
+            doc = addParentField(doc, parentField);
+          }
           reserveOneDoc();
           try {
             indexingChain.processDocument(numDocsInRAM++, doc);
