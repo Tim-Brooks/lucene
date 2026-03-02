@@ -1499,6 +1499,33 @@ public class IndexWriter
   }
 
   /**
+   * Adds multiple independent documents to the index in a single batch for performance.
+   *
+   * <p>Unlike {@link #addDocuments(Iterable)}, documents are NOT treated as a block. Each document
+   * is independent and may be re-ordered by index sort or separated during merging.
+   *
+   * <p>This provides a performance optimization by processing all documents on a single indexing
+   * thread with a single lock acquisition and flush check.
+   *
+   * @return The <a href="#sequence_number">sequence number</a> for this operation
+   * @throws IOException if there is a low-level IO error
+   * @lucene.experimental
+   */
+  public long batchAddDocuments(Iterable<? extends Iterable<? extends IndexableField>> docs)
+          throws IOException {
+    ensureOpen();
+    try {
+      return maybeProcessEvents(docWriter.batchAddDocuments(docs));
+    } catch (Throwable t) {
+      if (t instanceof Error) {
+        onTragicEvent(t, "batchAddDocuments");
+      }
+      maybeCloseOnTragicEvent();
+      throw t;
+    }
+  }
+
+  /**
    * Atomically adds a block of documents with sequentially assigned document IDs, such that an
    * external reader will see all or none of the documents.
    *

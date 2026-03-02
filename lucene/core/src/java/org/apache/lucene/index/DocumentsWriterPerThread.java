@@ -294,6 +294,49 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
     }
   }
 
+  long addBatchedDocuments(
+      Iterable<? extends Iterable<? extends IndexableField>> docs,
+      DocumentsWriter.FlushNotifications flushNotifications,
+      Runnable onNewDocOnRAM)
+      throws IOException {
+    try {
+      testPoint("DocumentsWriterPerThread addBatchedDocuments start");
+      assert abortingException == null : "DWPT has hit aborting exception but is still indexing";
+      if (INFO_VERBOSE && infoStream.isEnabled("DWPT")) {
+        infoStream.message(
+            "DWPT",
+            Thread.currentThread().getName()
+                + " addBatchedDocuments"
+                + " docID="
+                + numDocsInRAM
+                + " seg="
+                + segmentInfo.name);
+      }
+      final int docsInRamBefore = numDocsInRAM;
+      boolean allDocsIndexed = false;
+      try {
+        for (Iterable<? extends IndexableField> doc : docs) {
+          reserveOneDoc();
+          try {
+            indexingChain.processDocument(numDocsInRAM++, doc);
+          } finally {
+            onNewDocOnRAM.run();
+          }
+        }
+        // NOTE: no setHasBlocks() — documents are independent, not a block
+        allDocsIndexed = true;
+        return finishDocuments(/* deleteNode= */ null, docsInRamBefore);
+      } finally {
+        if (!allDocsIndexed && !aborted) {
+          // mark all docs from this batch as deleted on failure
+          deleteLastDocs(numDocsInRAM - docsInRamBefore);
+        }
+      }
+    } finally {
+      maybeAbort("addBatchedDocuments", flushNotifications);
+    }
+  }
+
   private Iterable<? extends IndexableField> addParentField(
       Iterable<? extends IndexableField> doc, IndexableField parentField) {
     return () -> {
