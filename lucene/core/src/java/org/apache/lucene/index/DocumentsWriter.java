@@ -452,6 +452,44 @@ final class DocumentsWriter implements Closeable, Accountable {
     return seqNo;
   }
 
+  long batchAddDocuments(
+      final Iterable<? extends Iterable<? extends IndexableField>> docs) throws IOException {
+    boolean hasEvents = preUpdate();
+
+    final DocumentsWriterPerThread dwpt = flushControl.obtainAndLock();
+    final DocumentsWriterPerThread flushingDWPT;
+    long seqNo;
+
+    try {
+      // This must happen after we've pulled the DWPT because IW.close
+      // waits for all DWPT to be released:
+      ensureOpen();
+      try {
+        seqNo =
+            dwpt.addBatchedDocuments(docs, flushNotifications, numDocsInRAM::incrementAndGet);
+      } finally {
+        if (dwpt.isAborted()) {
+          flushControl.doOnAbort(dwpt);
+        }
+      }
+      flushingDWPT = flushControl.doAfterDocument(dwpt);
+    } finally {
+      synchronized (flushControl) {
+        if (dwpt.isFlushPending() || dwpt.isAborted() || dwpt.isQueueAdvanced()) {
+          dwpt.unlock();
+        } else {
+          perThreadPool.marksAsFreeAndUnlock(dwpt);
+        }
+      }
+      assert dwpt.isHeldByCurrentThread() == false : "we didn't release the dwpt even on abort";
+    }
+
+    if (postUpdate(flushingDWPT, hasEvents)) {
+      seqNo = -seqNo;
+    }
+    return seqNo;
+  }
+
   private boolean maybeFlush() throws IOException {
     final DocumentsWriterPerThread flushingDWPT = flushControl.nextPendingFlush();
     if (flushingDWPT != null) {

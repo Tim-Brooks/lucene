@@ -65,6 +65,8 @@ import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.LongPoint;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
+import org.apache.lucene.search.Sort;
+import org.apache.lucene.search.SortField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
 import org.apache.lucene.document.StoredField;
@@ -5087,6 +5089,131 @@ public class TestIndexWriter extends LuceneTestCase {
     reader = DirectoryReader.open(dir);
     assertEquals(110, reader.maxDoc());
     assertEquals(110, reader.numDocs());
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+
+  public void testBatchAddDocuments() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig());
+
+    int numDocs = 100;
+    List<Iterable<? extends IndexableField>> docs = new ArrayList<>();
+    for (int i = 0; i < numDocs; i++) {
+      Document doc = new Document();
+      doc.add(newStringField("id", Integer.toString(i), Field.Store.YES));
+      docs.add(doc);
+    }
+    writer.batchAddDocuments(docs);
+    writer.commit();
+
+    DirectoryReader reader = DirectoryReader.open(dir);
+    assertEquals(numDocs, reader.numDocs());
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+
+  public void testBatchAddDocumentsWithIndexSort() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    iwc.setIndexSort(new Sort(new SortField("sortVal", SortField.Type.LONG)));
+    IndexWriter writer = new IndexWriter(dir, iwc);
+
+    List<Iterable<? extends IndexableField>> docs = new ArrayList<>();
+    // Add docs with descending sort values so sort must reorder them
+    for (int i = 10; i >= 1; i--) {
+      Document doc = new Document();
+      doc.add(new NumericDocValuesField("sortVal", i));
+      doc.add(newStringField("id", Integer.toString(i), Field.Store.YES));
+      docs.add(doc);
+    }
+    writer.batchAddDocuments(docs);
+    writer.commit();
+
+    DirectoryReader reader = DirectoryReader.open(dir);
+    assertEquals(10, reader.numDocs());
+    // Verify sort order: docs should be sorted ascending by sortVal
+    LeafReader leafReader = reader.leaves().get(0).reader();
+    NumericDocValues dv = leafReader.getNumericDocValues("sortVal");
+    long prev = Long.MIN_VALUE;
+    for (int i = 0; i < 10; i++) {
+      assertTrue(dv.advanceExact(i));
+      long val = dv.longValue();
+      assertTrue("Expected ascending sort, but got " + prev + " then " + val, val >= prev);
+      prev = val;
+    }
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+
+  public void testBatchAddDocumentsNoBlocks() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriter writer = new IndexWriter(dir, newIndexWriterConfig());
+
+    List<Iterable<? extends IndexableField>> docs = new ArrayList<>();
+    for (int i = 0; i < 10; i++) {
+      Document doc = new Document();
+      doc.add(newStringField("id", Integer.toString(i), Field.Store.YES));
+      docs.add(doc);
+    }
+    writer.batchAddDocuments(docs);
+    writer.commit();
+
+    DirectoryReader reader = DirectoryReader.open(dir);
+    for (LeafReaderContext ctx : reader.leaves()) {
+      assertFalse(
+          "batchAddDocuments should not create blocks",
+          ctx.reader().getMetaData().hasBlocks());
+    }
+    reader.close();
+    writer.close();
+    dir.close();
+  }
+
+  public void testBatchAddDocumentsAndMergeWithIndexSort() throws Exception {
+    Directory dir = newDirectory();
+    IndexWriterConfig iwc = newIndexWriterConfig();
+    iwc.setIndexSort(new Sort(new SortField("sortVal", SortField.Type.LONG)));
+    iwc.setMergePolicy(new LogDocMergePolicy());
+    IndexWriter writer = new IndexWriter(dir, iwc);
+
+    // Add multiple batches to create multiple segments
+    for (int batch = 0; batch < 5; batch++) {
+      List<Iterable<? extends IndexableField>> docs = new ArrayList<>();
+      for (int i = 0; i < 10; i++) {
+        Document doc = new Document();
+        long sortVal = batch * 10 + i;
+        doc.add(new NumericDocValuesField("sortVal", sortVal));
+        doc.add(newStringField("id", Long.toString(sortVal), Field.Store.YES));
+        docs.add(doc);
+      }
+      writer.batchAddDocuments(docs);
+      writer.flush();
+    }
+
+    writer.forceMerge(1);
+    writer.commit();
+
+    DirectoryReader reader = DirectoryReader.open(dir);
+    assertEquals(50, reader.numDocs());
+    assertEquals(1, reader.leaves().size());
+
+    // Verify sort order is maintained after merge — docs should interleave correctly
+    LeafReader leafReader = reader.leaves().get(0).reader();
+    assertFalse(
+        "merged segment should not have blocks", leafReader.getMetaData().hasBlocks());
+    NumericDocValues dv = leafReader.getNumericDocValues("sortVal");
+    long prev = Long.MIN_VALUE;
+    for (int i = 0; i < 50; i++) {
+      assertTrue(dv.advanceExact(i));
+      long val = dv.longValue();
+      assertTrue(
+          "Expected ascending sort after merge, but got " + prev + " then " + val, val >= prev);
+      prev = val;
+    }
     reader.close();
     writer.close();
     dir.close();
