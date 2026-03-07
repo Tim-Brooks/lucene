@@ -39,6 +39,7 @@ import org.apache.lucene.codecs.NormsFormat;
 import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PointsFormat;
 import org.apache.lucene.codecs.PointsWriter;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
@@ -558,7 +559,9 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  void processDocument(int docID, Iterable<? extends IndexableField> document) throws IOException {
+  void processDocument(
+      int docID, Iterable<? extends IndexableField> document, ReservedField<?> parentField)
+      throws IOException {
     // number of unique fields by names (collapses multiple field instances by the same name)
     int fieldCount = 0;
     int indexedFieldCount = 0; // number of unique fields indexed with postings
@@ -574,29 +577,44 @@ final class IndexingChain implements Accountable {
     termsHash.startDocument();
     startStoredFields(docID);
     try {
-      // 1st pass over doc fields – verify that doc schema matches the index schema
-      // build schema for each unique doc field
-      for (IndexableField field : document) {
-        IndexableFieldType fieldType = field.fieldType();
-        final boolean isReserved = field.getClass() == ReservedField.class;
-        PerField pf =
-            getOrAddPerField(
-                field.name(), false
-                /* we never add reserved fields during indexing should be done during DWPT setup*/ );
-        if (pf.reserved != isReserved) {
-          throw new IllegalArgumentException(
-              "\""
-                  + field.name()
-                  + "\" is a reserved field and should not be added to any document");
-        }
-        if (pf.fieldGen != fieldGen) { // first time we see this field in this document
-          fields[fieldCount++] = pf;
-          pf.fieldGen = fieldGen;
-          pf.reset(docID);
-        }
+      // 1st pass – validate schema for each field.
+      // Handle the reserved parent field first, before iterating the document fields.
+      // This keeps the parent field out of the document iterable, avoiding megamorphic
+      // iterator dispatch in the hot loops below.
+      if (parentField != null) {
+        IndexableField field = parentField.getDelegate();
+        PerField pf = getOrAddPerField(field.name(), false);
+        assert pf.reserved;
+        fieldCount = validateFieldSchema(docID, field.fieldType(), pf, fieldGen, fieldCount);
         if (docFieldIdx >= docFields.length) oversizeDocFields();
         docFields[docFieldIdx++] = pf;
-        updateDocFieldSchema(field.name(), pf.schema, fieldType);
+      }
+      for (IndexableField field : document) {
+        // Narrow to Field to give C2 a monomorphic fast path for name()/fieldType() inlining.
+        // Without this, the IndexableField interface dispatch is megamorphic (5+ Field subclasses)
+        // and C2 refuses to inline trivial getters like Field.name().
+        final String fieldName;
+        final IndexableFieldType fieldType;
+        if (field instanceof Field f) {
+          fieldName = f.name();
+          fieldType = f.fieldType();
+        } else {
+          fieldName = field.name();
+          fieldType = field.fieldType();
+        }
+        PerField pf =
+            getOrAddPerField(
+                fieldName, false
+                /* we never add reserved fields during indexing should be done during DWPT setup*/ );
+        if (pf.reserved) {
+          throw new IllegalArgumentException(
+              "\""
+                  + fieldName
+                  + "\" is a reserved field and should not be added to any document");
+        }
+        fieldCount = validateFieldSchema(docID, fieldType, pf, fieldGen, fieldCount);
+        if (docFieldIdx >= docFields.length) oversizeDocFields();
+        docFields[docFieldIdx++] = pf;
       }
       // For each field, if it's the first time we see this field in this segment,
       // initialize its FieldInfo.
@@ -611,15 +629,15 @@ final class IndexingChain implements Accountable {
         }
       }
 
-      // 2nd pass over doc fields – index each field
-      // also count the number of unique fields indexed with postings
+      // 2nd pass – index each field, count unique fields indexed with postings.
       docFieldIdx = 0;
+      if (parentField != null) {
+        IndexableField delegate = parentField.getDelegate();
+        indexedFieldCount =
+            indexField(docID, delegate, delegate.fieldType(), docFieldIdx++, indexedFieldCount);
+      }
       for (IndexableField field : document) {
-        if (processField(docID, field, docFields[docFieldIdx])) {
-          fields[indexedFieldCount] = docFields[docFieldIdx];
-          indexedFieldCount++;
-        }
-        docFieldIdx++;
+        indexedFieldCount = indexField(docID, field, field instanceof Field f ? f.fieldType() : field.fieldType(), docFieldIdx++, indexedFieldCount);
       }
     } finally {
       if (hasHitAbortingException == false) {
@@ -639,6 +657,28 @@ final class IndexingChain implements Accountable {
         }
       }
     }
+  }
+
+  /** Validates and records the schema for a field in pass 1. Returns updated fieldCount. */
+  private int validateFieldSchema(
+      int docID, IndexableFieldType fieldType, PerField pf, long fieldGen, int fieldCount) {
+    if (pf.fieldGen != fieldGen) { // first time we see this field in this document
+      fields[fieldCount++] = pf;
+      pf.fieldGen = fieldGen;
+      pf.reset(docID);
+    }
+    updateDocFieldSchema(pf.fieldName, pf.schema, fieldType);
+    return fieldCount;
+  }
+
+  /** Indexes a single field in pass 2. Returns updated indexedFieldCount. */
+  private int indexField(int docID, IndexableField field, IndexableFieldType fieldType, int docFieldIdx, int indexedFieldCount)
+      throws IOException {
+    if (processField(docID, field, fieldType, docFields[docFieldIdx])) {
+      fields[indexedFieldCount] = docFields[docFieldIdx];
+      indexedFieldCount++;
+    }
+    return indexedFieldCount;
   }
 
   private void oversizeDocFields() {
@@ -731,31 +771,35 @@ final class IndexingChain implements Accountable {
   }
 
   /** Index each field Returns {@code true}, if we are indexing a unique field with postings */
-  private boolean processField(int docID, IndexableField field, PerField pf) throws IOException {
-    IndexableFieldType fieldType = field.fieldType();
+  private boolean processField(int docID, IndexableField field, IndexableFieldType fieldType, PerField pf) throws IOException {
     boolean indexedField = false;
 
     // Invert indexed fields
     if (fieldType.indexOptions() != IndexOptions.NONE) {
       if (pf.first) { // first time we see this field in this doc
-        pf.invert(docID, field, true);
+        pf.invert(docID, field, fieldType, true);
         pf.first = false;
         indexedField = true;
       } else {
-        pf.invert(docID, field, false);
+        pf.invert(docID, field, fieldType, false);
       }
     }
 
     // Add stored fields
     if (fieldType.stored()) {
-      StoredValue storedValue = field.storedValue();
+      StoredValue storedValue;
+      if (field instanceof Field f) {
+        storedValue = f.storedValue();
+      } else {
+        storedValue = field.storedValue();
+      }
       if (storedValue == null) {
         throw new IllegalArgumentException("Cannot store a null value");
       } else if (storedValue.getType() == StoredValue.Type.STRING
           && storedValue.getStringValue().length() > IndexWriter.MAX_STORED_STRING_LENGTH) {
         throw new IllegalArgumentException(
             "stored field \""
-                + field.name()
+                + pf.fieldInfo.name
                 + "\" is too large ("
                 + storedValue.getStringValue().length()
                 + " characters) to store");
@@ -1180,8 +1224,8 @@ final class IndexingChain implements Accountable {
      * Inverts one field for one document; first is true if this is the first time we are seeing
      * this field name in this document.
      */
-    public void invert(int docID, IndexableField field, boolean first) throws IOException {
-      assert field.fieldType().indexOptions().compareTo(IndexOptions.DOCS) >= 0;
+    public void invert(int docID, IndexableField field, IndexableFieldType fieldType, boolean first) throws IOException {
+      assert fieldType.indexOptions().compareTo(IndexOptions.DOCS) >= 0;
 
       if (first) {
         // First time we're seeing this field (indexed) in this document
@@ -1190,19 +1234,19 @@ final class IndexingChain implements Accountable {
 
       switch (field.invertableType()) {
         case BINARY:
-          invertTerm(docID, field, first);
+          invertTerm(docID, field, fieldType, first);
           break;
         case TOKEN_STREAM:
-          invertTokenStream(docID, field, first);
+          invertTokenStream(docID, field, fieldType, first);
           break;
         default:
           throw new AssertionError();
       }
     }
 
-    private void invertTokenStream(int docID, IndexableField field, boolean first)
+    private void invertTokenStream(int docID, IndexableField field, IndexableFieldType fieldType, boolean first)
         throws IOException {
-      final boolean analyzed = field.fieldType().tokenized() && analyzer != null;
+      final boolean analyzed = fieldType.tokenized() && analyzer != null;
       /*
        * To assist people in tracking down problems in analysis components, we wish to write the field name to the infostream
        * when we fail. We expect some caller to eventually deal with the real exception, so we don't want any 'catch' clauses,
@@ -1345,7 +1389,7 @@ final class IndexingChain implements Accountable {
       }
     }
 
-    private void invertTerm(int docID, IndexableField field, boolean first) throws IOException {
+    private void invertTerm(int docID, IndexableField field, IndexableFieldType fieldType, boolean first) throws IOException {
       BytesRef binaryValue = field.binaryValue();
       if (binaryValue == null) {
         throw new IllegalArgumentException(
@@ -1353,7 +1397,6 @@ final class IndexingChain implements Accountable {
                 + field.name()
                 + " returns TERM for invertableType() and null for binaryValue(), which is illegal");
       }
-      final IndexableFieldType fieldType = field.fieldType();
       if (fieldType.tokenized()
           || fieldType.indexOptions().compareTo(IndexOptions.DOCS_AND_FREQS) > 0
           || fieldType.storeTermVectorPositions()
