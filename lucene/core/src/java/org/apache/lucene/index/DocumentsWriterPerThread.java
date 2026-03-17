@@ -24,7 +24,6 @@ import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
-import java.util.NoSuchElementException;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.TimeUnit;
@@ -249,11 +248,7 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
         final Iterator<? extends Iterable<? extends IndexableField>> iterator = docs.iterator();
         while (iterator.hasNext()) {
           Iterable<? extends IndexableField> doc = iterator.next();
-          if (parentField != null) {
-            if (iterator.hasNext() == false) {
-              doc = addParentField(doc, parentField);
-            }
-          } else if (segmentInfo.getIndexSort() != null
+          if (parentField == null && segmentInfo.getIndexSort() != null
               && iterator.hasNext()
               && indexMajorVersionCreated >= Version.LUCENE_10_0_0.major) {
             // sort is configured but parent field is missing, yet we have a doc-block
@@ -271,7 +266,8 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
           // vs non-aborting exceptions):
           reserveOneDoc();
           try {
-            indexingChain.processDocument(numDocsInRAM++, doc);
+            indexingChain.processDocument(
+                numDocsInRAM++, doc, iterator.hasNext() ? null : parentField);
           } finally {
             onNewDocOnRAM.run();
           }
@@ -316,13 +312,10 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
       boolean allDocsIndexed = false;
       try {
         for (Iterable<? extends IndexableField> doc : docs) {
-          // Each document is independent (its own root), so add the parent field to every doc
-          if (parentField != null) {
-            doc = addParentField(doc, parentField);
-          }
           reserveOneDoc();
           try {
-            indexingChain.processDocument(numDocsInRAM++, doc);
+            // Each document is independent (its own root), so add the parent field to every doc
+            indexingChain.processDocument(numDocsInRAM++, doc, parentField);
           } finally {
             onNewDocOnRAM.run();
           }
@@ -339,34 +332,6 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
     } finally {
       maybeAbort("addBatchedDocuments", flushNotifications);
     }
-  }
-
-  private Iterable<? extends IndexableField> addParentField(
-      Iterable<? extends IndexableField> doc, IndexableField parentField) {
-    return () -> {
-      final Iterator<? extends IndexableField> first = doc.iterator();
-      return new Iterator<>() {
-        IndexableField additionalField = parentField;
-
-        @Override
-        public boolean hasNext() {
-          return additionalField != null || first.hasNext();
-        }
-
-        @Override
-        public IndexableField next() {
-          if (additionalField != null) {
-            IndexableField field = additionalField;
-            additionalField = null;
-            return field;
-          }
-          if (first.hasNext()) {
-            return first.next();
-          }
-          throw new NoSuchElementException();
-        }
-      };
-    };
   }
 
   private long finishDocuments(DocumentsWriterDeleteQueue.Node<?> deleteNode, int docIdUpTo) {

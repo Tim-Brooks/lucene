@@ -558,7 +558,9 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  void processDocument(int docID, Iterable<? extends IndexableField> document) throws IOException {
+  void processDocument(
+      int docID, Iterable<? extends IndexableField> document, IndexableField parentField)
+      throws IOException {
     // number of unique fields by names (collapses multiple field instances by the same name)
     int fieldCount = 0;
     int indexedFieldCount = 0; // number of unique fields indexed with postings
@@ -574,10 +576,19 @@ final class IndexingChain implements Accountable {
     termsHash.startDocument();
     startStoredFields(docID);
     try {
+      // Handle parent field — always a ReservedField, registered during DWPT setup
+      if (parentField != null) {
+        assert parentField.getClass() == ReservedField.class;
+        PerField pf = getOrAddPerField(parentField.name(), false);
+        fieldCount = maybeInitField(docID, pf, fieldGen, fieldCount);
+        if (docFieldIdx == docFields.length) oversizeDocFields();
+        docFields[docFieldIdx++] = pf;
+        updateDocFieldSchema(parentField.name(), pf.schema, parentField.fieldType());
+      }
+
       // 1st pass over doc fields – verify that doc schema matches the index schema
       // build schema for each unique doc field
       for (IndexableField field : document) {
-        IndexableFieldType fieldType = field.fieldType();
         final boolean isReserved = field.getClass() == ReservedField.class;
         PerField pf =
             getOrAddPerField(
@@ -589,14 +600,10 @@ final class IndexingChain implements Accountable {
                   + field.name()
                   + "\" is a reserved field and should not be added to any document");
         }
-        if (pf.fieldGen != fieldGen) { // first time we see this field in this document
-          fields[fieldCount++] = pf;
-          pf.fieldGen = fieldGen;
-          pf.reset(docID);
-        }
+        fieldCount = maybeInitField(docID, pf, fieldGen, fieldCount);
         if (docFieldIdx >= docFields.length) oversizeDocFields();
         docFields[docFieldIdx++] = pf;
-        updateDocFieldSchema(field.name(), pf.schema, fieldType);
+        updateDocFieldSchema(field.name(), pf.schema, field.fieldType());
       }
       // For each field, if it's the first time we see this field in this segment,
       // initialize its FieldInfo.
@@ -614,6 +621,13 @@ final class IndexingChain implements Accountable {
       // 2nd pass over doc fields – index each field
       // also count the number of unique fields indexed with postings
       docFieldIdx = 0;
+      if (parentField != null) {
+        if (processField(docID, parentField, docFields[docFieldIdx])) {
+          fields[indexedFieldCount] = docFields[docFieldIdx];
+          indexedFieldCount++;
+        }
+        docFieldIdx++;
+      }
       for (IndexableField field : document) {
         if (processField(docID, field, docFields[docFieldIdx])) {
           fields[indexedFieldCount] = docFields[docFieldIdx];
@@ -639,6 +653,15 @@ final class IndexingChain implements Accountable {
         }
       }
     }
+  }
+
+  private int maybeInitField(int docID, PerField pf, long fieldGen, int fieldCount) {
+    if (pf.fieldGen != fieldGen) {
+      fields[fieldCount++] = pf;
+      pf.fieldGen = fieldGen;
+      pf.reset(docID);
+    }
+    return fieldCount;
   }
 
   private void oversizeDocFields() {
