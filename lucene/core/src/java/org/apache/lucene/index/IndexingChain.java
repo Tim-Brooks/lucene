@@ -90,6 +90,8 @@ final class IndexingChain implements Accountable {
   // Holds fields seen in each document
   private PerField[] fields = new PerField[1];
   private PerField[] docFields = new PerField[2];
+  private int indexedFieldCount;
+  private int docFieldIdx;
   private final InfoStream infoStream;
   private final ByteBlockPool.Allocator byteBlockAllocator;
   private final LiveIndexWriterConfig indexWriterConfig;
@@ -561,107 +563,148 @@ final class IndexingChain implements Accountable {
   void processDocument(
       int docID, Iterable<? extends IndexableField> document, IndexableField parentField)
       throws IOException {
-    // number of unique fields by names (collapses multiple field instances by the same name)
-    int fieldCount = 0;
-    int indexedFieldCount = 0; // number of unique fields indexed with postings
+    indexedFieldCount = 0;
+    docFieldIdx = 0;
     long fieldGen = nextFieldGen++;
-    int docFieldIdx = 0;
 
-    // NOTE: we need two passes here, in case there are
-    // multi-valued fields, because we must process all
-    // instances of a given field at once, since the
-    // analyzer is free to reuse TokenStream across fields
-    // (i.e., we cannot have more than one TokenStream
-    // running "at once"):
     termsHash.startDocument();
     startStoredFields(docID);
     try {
-      // Handle parent field — always a ReservedField, registered during DWPT setup
-      if (parentField != null) {
-        assert parentField.getClass() == ReservedField.class;
-        PerField pf = getOrAddPerField(parentField.name(), false);
-        fieldCount = maybeInitField(docID, pf, fieldGen, fieldCount);
-        if (docFieldIdx == docFields.length) oversizeDocFields();
-        docFields[docFieldIdx++] = pf;
-        updateDocFieldSchema(parentField.name(), pf.schema, parentField.fieldType());
-      }
-
-      // 1st pass over doc fields – verify that doc schema matches the index schema
-      // build schema for each unique doc field
-      for (IndexableField field : document) {
-        final boolean isReserved = field.getClass() == ReservedField.class;
-        PerField pf =
-            getOrAddPerField(
-                field.name(), false
-                /* we never add reserved fields during indexing should be done during DWPT setup*/ );
-        if (pf.reserved != isReserved) {
-          throw new IllegalArgumentException(
-              "\""
-                  + field.name()
-                  + "\" is a reserved field and should not be added to any document");
-        }
-        fieldCount = maybeInitField(docID, pf, fieldGen, fieldCount);
-        if (docFieldIdx >= docFields.length) oversizeDocFields();
-        docFields[docFieldIdx++] = pf;
-        updateDocFieldSchema(field.name(), pf.schema, field.fieldType());
-      }
-      // For each field, if it's the first time we see this field in this segment,
-      // initialize its FieldInfo.
-      // If we have already seen this field, verify that its schema
-      // within the current doc matches its schema in the index.
-      for (int i = 0; i < fieldCount; i++) {
-        PerField pf = fields[i];
-        if (pf.fieldInfo == null) {
-          initializeFieldInfo(pf);
-        } else {
-          pf.schema.assertSameSchema(pf.fieldInfo);
-        }
-      }
-
-      // 2nd pass over doc fields – index each field
-      // also count the number of unique fields indexed with postings
-      docFieldIdx = 0;
-      if (parentField != null) {
-        if (processField(docID, parentField, docFields[docFieldIdx])) {
-          fields[indexedFieldCount] = docFields[docFieldIdx];
-          indexedFieldCount++;
-        }
-        docFieldIdx++;
-      }
-      for (IndexableField field : document) {
-        if (processField(docID, field, docFields[docFieldIdx])) {
-          fields[indexedFieldCount] = docFields[docFieldIdx];
-          indexedFieldCount++;
-        }
-        docFieldIdx++;
+      boolean hasNewFields = indexFields(docID, document, parentField, fieldGen);
+      if (hasNewFields) {
+        indexNewFields(docID, document, parentField);
       }
     } finally {
       if (hasHitAbortingException == false) {
-        // Finish each indexed field name seen in the document:
-        for (int i = 0; i < indexedFieldCount; i++) {
-          fields[i].finish(docID);
+        finishDocumentFields(docID);
+      }
+    }
+  }
+
+  /**
+   * Main indexing pass over document fields. For fields already known to this segment, processes
+   * them immediately. For fields new to the segment, accumulates their schema and defers processing
+   * until {@link #indexNewFields} initializes their FieldInfo.
+   *
+   * @return true if any fields new to this segment were encountered
+   */
+  private boolean indexFields(
+      int docID,
+      Iterable<? extends IndexableField> document,
+      IndexableField parentField,
+      long fieldGen)
+      throws IOException {
+    boolean hasNewFields = false;
+
+    // Handle parent field first — always a ReservedField, registered during DWPT setup
+    if (parentField != null) {
+      assert parentField.getClass() == ReservedField.class;
+      PerField pf = getOrAddPerField(parentField.name(), false);
+      if (pf.fieldGen != fieldGen) {
+        hasNewFields = initDocField(docID, parentField, pf, fieldGen);
+      }
+    }
+
+    for (IndexableField field : document) {
+      final boolean isReserved = field.getClass() == ReservedField.class;
+      PerField pf = getOrAddPerField(field.name(), false);
+      if (pf.reserved != isReserved) {
+        throw new IllegalArgumentException(
+            "\""
+                + field.name()
+                + "\" is a reserved field and should not be added to any document");
+      }
+
+      if (pf.fieldGen != fieldGen) {
+        // First time we see this field in this document
+        hasNewFields |= initDocField(docID, field, pf, fieldGen);
+      } else if (pf.fieldInfo == null) {
+        // Multi-value instance of a new field — keep accumulating schema
+        updateDocFieldSchema(field.name(), pf.schema, field.fieldType());
+      } else {
+        // Multi-value instance of a known field — fast path
+        if (processField(docID, field, pf)) {
+          fields[indexedFieldCount++] = pf;
         }
-        finishStoredFields();
-        // TODO: for broken docs, optimize termsHash.finishDocument
-        try {
-          termsHash.finishDocument(docID);
-        } catch (Throwable th) {
-          // Must abort, on the possibility that on-disk term
-          // vectors are now corrupt:
-          abortingExceptionConsumer.accept(th);
-          throw th;
+      }
+    }
+
+    return hasNewFields;
+  }
+
+  /**
+   * Initializes a PerField for the first occurrence of a field in a document. If the field already
+   * has a FieldInfo (known to segment), processes it immediately. Otherwise, begins schema
+   * accumulation for deferred processing.
+   *
+   * @return true if this field is new to the segment
+   */
+  private boolean initDocField(int docID, IndexableField field, PerField pf, long fieldGen)
+      throws IOException {
+    if (docFieldIdx >= docFields.length) oversizeDocFields();
+    docFields[docFieldIdx++] = pf;
+    pf.fieldGen = fieldGen;
+    pf.first = true;
+    pf.deferredNewField = false;
+    if (pf.fieldInfo == null) {
+      pf.schema.reset(docID);
+      updateDocFieldSchema(field.name(), pf.schema, field.fieldType());
+      pf.deferredNewField = true;
+      return true;
+    } else {
+      // Fast path: FieldInfo already established, skip schema validation
+      if (processField(docID, field, pf)) {
+        fields[indexedFieldCount++] = pf;
+      }
+      return false;
+    }
+  }
+
+  /**
+   * Second pass for fields new to this segment. Initializes their FieldInfo now that schema is
+   * fully accumulated across all multi-value instances, then processes all deferred field instances.
+   */
+  private void indexNewFields(
+      int docID, Iterable<? extends IndexableField> document, IndexableField parentField)
+      throws IOException {
+    // Initialize FieldInfo for all new fields now that schema is complete
+    for (int i = 0; i < docFieldIdx; i++) {
+      PerField pf = docFields[i];
+      if (pf.fieldInfo == null) {
+        initializeFieldInfo(pf);
+      }
+    }
+
+    // Index the new fields — parent first, then document fields
+    if (parentField != null) {
+      PerField pf = getPerField(parentField.name());
+      if (pf != null && pf.deferredNewField) {
+        if (processField(docID, parentField, pf)) {
+          fields[indexedFieldCount++] = pf;
+        }
+      }
+    }
+    for (IndexableField field : document) {
+      PerField pf = getPerField(field.name());
+      if (pf != null && pf.deferredNewField) {
+        if (processField(docID, field, pf)) {
+          fields[indexedFieldCount++] = pf;
         }
       }
     }
   }
 
-  private int maybeInitField(int docID, PerField pf, long fieldGen, int fieldCount) {
-    if (pf.fieldGen != fieldGen) {
-      fields[fieldCount++] = pf;
-      pf.fieldGen = fieldGen;
-      pf.reset(docID);
+  private void finishDocumentFields(int docID) throws IOException {
+    for (int i = 0; i < indexedFieldCount; i++) {
+      fields[i].finish(docID);
     }
-    return fieldCount;
+    finishStoredFields();
+    try {
+      termsHash.finishDocument(docID);
+    } catch (Throwable th) {
+      abortingExceptionConsumer.accept(th);
+      throw th;
+    }
   }
 
   private void oversizeDocFields() {
@@ -816,30 +859,36 @@ final class IndexingChain implements Accountable {
     }
     if (pf == null) {
       // first time we encounter field with this name in this segment
-      FieldSchema schema = new FieldSchema(fieldName);
-      pf =
-          new PerField(
-              fieldName,
-              indexCreatedVersionMajor,
-              schema,
-              indexWriterConfig.getSimilarity(),
-              indexWriterConfig.getInfoStream(),
-              indexWriterConfig.getAnalyzer(),
-              reserved);
-      pf.next = fieldHash[hashPos];
-      fieldHash[hashPos] = pf;
-      totalFieldCount++;
-      // At most 50% load factor:
-      if (totalFieldCount >= fieldHash.length / 2) {
-        rehash();
-      }
-      if (totalFieldCount > fields.length) {
-        PerField[] newFields =
-            new PerField
-                [ArrayUtil.oversize(totalFieldCount, RamUsageEstimator.NUM_BYTES_OBJECT_REF)];
-        System.arraycopy(fields, 0, newFields, 0, fields.length);
-        fields = newFields;
-      }
+      pf = createPerField(fieldName, reserved, hashPos);
+    }
+    return pf;
+  }
+
+  private PerField createPerField(String fieldName, boolean reserved, int hashPos) {
+    PerField pf;
+    FieldSchema schema = new FieldSchema(fieldName);
+    pf =
+        new PerField(
+                fieldName,
+            indexCreatedVersionMajor,
+            schema,
+            indexWriterConfig.getSimilarity(),
+            indexWriterConfig.getInfoStream(),
+            indexWriterConfig.getAnalyzer(),
+                reserved);
+    pf.next = fieldHash[hashPos];
+    fieldHash[hashPos] = pf;
+    totalFieldCount++;
+    // At most 50% load factor:
+    if (totalFieldCount >= fieldHash.length / 2) {
+      rehash();
+    }
+    if (totalFieldCount > fields.length) {
+      PerField[] newFields =
+          new PerField
+              [ArrayUtil.oversize(totalFieldCount, RamUsageEstimator.NUM_BYTES_OBJECT_REF)];
+      System.arraycopy(fields, 0, newFields, 0, fields.length);
+      fields = newFields;
     }
     return pf;
   }
@@ -1130,6 +1179,7 @@ final class IndexingChain implements Accountable {
     private final InfoStream infoStream;
     private final Analyzer analyzer;
     private boolean first; // first in a document
+    private boolean deferredNewField; // new to segment, deferred for processing after schema init
 
     PerField(
         String fieldName,
