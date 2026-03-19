@@ -598,20 +598,20 @@ final class IndexingChain implements Accountable {
 
     // Handle parent field first — always a ReservedField, registered during DWPT setup
     if (parentField != null) {
-      assert parentField.getClass() == ReservedField.class;
-      PerField pf = getOrAddPerField(parentField.name(), false);
+      PerField pf = getOrAddPerField(parentField.name(), true);
       if (pf.fieldGen != fieldGen) {
         hasNewFields = initDocField(docID, parentField, pf, fieldGen);
       }
     }
 
     for (IndexableField field : document) {
+      String fieldName = field.name();
       final boolean isReserved = field.getClass() == ReservedField.class;
-      PerField pf = getOrAddPerField(field.name(), false);
+      PerField pf = getOrAddPerField(fieldName, false);
       if (pf.reserved != isReserved) {
         throw new IllegalArgumentException(
             "\""
-                + field.name()
+                + fieldName
                 + "\" is a reserved field and should not be added to any document");
       }
 
@@ -620,7 +620,7 @@ final class IndexingChain implements Accountable {
         hasNewFields |= initDocField(docID, field, pf, fieldGen);
       } else if (pf.fieldInfo == null) {
         // Multi-value instance of a new field — keep accumulating schema
-        updateDocFieldSchema(field.name(), pf.schema, field.fieldType());
+        updateDocFieldSchema(fieldName, pf.schema, field.fieldType());
       } else {
         // Multi-value instance of a known field — fast path
         if (processField(docID, field, pf)) {
