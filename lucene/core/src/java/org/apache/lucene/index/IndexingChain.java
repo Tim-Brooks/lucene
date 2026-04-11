@@ -86,8 +86,6 @@ final class IndexingChain implements Accountable {
   private int totalFieldCount;
   private long nextFieldGen;
 
-  private final PerField parentPf;
-
   // Holds fields seen in each document
   private PerField[] fields = new PerField[1];
   private PerField[] docFields = new PerField[2];
@@ -96,6 +94,7 @@ final class IndexingChain implements Accountable {
   private final LiveIndexWriterConfig indexWriterConfig;
   private final int indexCreatedVersionMajor;
   private final Consumer<Throwable> abortingExceptionConsumer;
+  private final PerField parentPf;
   private final NumericDocValuesField parentField;
   private boolean hasHitAbortingException;
 
@@ -144,8 +143,7 @@ final class IndexingChain implements Accountable {
     docValuesBytePool = new ByteBlockPool(byteBlockAllocator);
     if (indexWriterConfig.getParentField() != null) {
       this.parentField = new NumericDocValuesField(indexWriterConfig.getParentField(), -1);
-      parentPf = getOrAddPerField(this.parentField.name(), true);
-      parentPf.maybeCacheFrozenFieldType(this.parentField.fieldType());
+      parentPf = getOrAddPerField(this.parentField.name());
       updateDocFieldSchema(this.parentField.name(), parentPf.schema, this.parentField.fieldType());
     } else {
       this.parentField = null;
@@ -572,8 +570,8 @@ final class IndexingChain implements Accountable {
   void processDocument(
       int docID, Iterable<? extends IndexableField> document, boolean lastDocInBlock)
       throws IOException {
-    // number of unique fields by names (collapses multiple field instances by the same name)
-    int fieldCount = 0;
+    // number of unique fields by name which need to be init in segment or full validation
+    int fieldsNeedInitOrValidate = 0;
     int indexedFieldCount = 0; // number of unique fields indexed with postings
     long fieldGen = nextFieldGen++;
     int docFieldIdx = 0;
@@ -587,55 +585,56 @@ final class IndexingChain implements Accountable {
     termsHash.startDocument();
     startStoredFields(docID);
     try {
-      boolean needInitOrValidate = false;
-
-      // Handle the parent field first (before document fields) .Its schema was already
+      // Handle the parent field first (before document fields). Its schema was already
       // set up in the constructor, so we only need to set the docID and trigger
-      // initializeFieldInfo on first encounter in this segment.
+      // initializeFieldInfo on the first encounter in this segment.
       if (lastDocInBlock && parentPf != null) {
         parentPf.schema.resetJustDocId(docID);
         if (parentPf.fieldInfo == null) {
-          fields[fieldCount++] = parentPf;
-          needInitOrValidate = true;
+          fields[fieldsNeedInitOrValidate++] = parentPf;
         }
       }
 
       // 1st pass over doc fields – verify that doc schema matches the index schema
       // build schema for each unique doc field
       for (IndexableField field : document) {
-        String fieldName = field.name();
-        IndexableFieldType fieldType = field.fieldType();
+        final String fieldName = field.name();
+        final IndexableFieldType fieldType = field.fieldType();
         PerField pf =
-            getOrAddPerField(
-                fieldName, false
-                /* we never add reserved fields during indexing should be done during DWPT setup*/ );
-        if (pf.reserved) {
+            getOrAddPerField(fieldName);
+        if (pf == parentPf) {
           throw new IllegalArgumentException(
               "\"" + fieldName + "\" is a reserved field and should not be added to any document");
         }
         if (pf.fieldGen != fieldGen) { // first time we see this field in this document
-          fields[fieldCount++] = pf;
           pf.fieldGen = fieldGen;
           pf.reset(docID, fieldType);
-        } else if (pf.frozenFieldType != null && fieldType != pf.frozenFieldType) {
-          deoptimizeSchemaValidation(docID, pf, fieldType, fieldName);
+          if (pf.validatedFrozenFieldType == null) {
+            fields[fieldsNeedInitOrValidate++] = pf;
+          }
+        } else if (pf.multiValueForcesDeoptimize(fieldType)) {
+          // Multi-valued field with a different field type than the cached frozen type.
+          // Drop the validated frozen field type to force the validation path.
+          pf.validatedFrozenFieldType = null;
+          fields[fieldsNeedInitOrValidate++] = pf;
         }
         if (docFieldIdx >= docFields.length) oversizeDocFields();
         docFields[docFieldIdx++] = pf;
-        if (pf.frozenFieldType == null || pf.fieldInfo == null) {
-          needInitOrValidate = true;
+        if (pf.validatedFrozenFieldType == null) {
           updateDocFieldSchema(fieldName, pf.schema, fieldType);
         }
       }
 
-      if (needInitOrValidate) {
-        initAndValidateFields(fieldCount);
+      if (fieldsNeedInitOrValidate > 0) {
+        initAndValidateFields(fieldsNeedInitOrValidate);
       }
 
       // 2nd pass – index parent field first, then document fields
       if (lastDocInBlock && parentPf != null) {
-        // Parent doc is never indexed so does not need to be tracked for finsh()
-        processField(docID, parentField, parentPf);
+        if (processField(docID, parentField, parentPf)) {
+          fields[indexedFieldCount] = parentPf;
+          indexedFieldCount++;
+        }
       }
       docFieldIdx = 0;
       for (IndexableField field : document) {
@@ -672,25 +671,13 @@ final class IndexingChain implements Accountable {
     // within the current doc matches its schema in the index.
     for (int i = 0; i < fieldCount; i++) {
       PerField pf = fields[i];
-      if (pf.frozenFieldType != null && pf.fieldInfo != null) {
-        continue;
-      }
       if (pf.fieldInfo == null) {
         initializeFieldInfo(pf);
+        pf.trySetValidatedFrozenFieldType();
       } else {
         pf.schema.assertSameSchema(pf.fieldInfo);
       }
     }
-  }
-
-  private static void deoptimizeSchemaValidation(
-      int docID, PerField pf, IndexableFieldType fieldType, String fieldName) {
-    // Multi-valued field with a different field type than the cached frozen type.
-    // Replay the schema contribution from the earlier skipped values (all had the
-    // same frozen type), then invalidate the cache.
-    FieldType previousFrozenType = pf.frozenFieldType;
-    pf.reset(docID, fieldType);
-    updateDocFieldSchema(fieldName, pf.schema, previousFrozenType);
   }
 
   private void oversizeDocFields() {
@@ -837,7 +824,7 @@ final class IndexingChain implements Accountable {
    * Returns a previously created {@link PerField}, absorbing the type information from {@link
    * FieldType}, and creates a new {@link PerField} if this field name wasn't seen yet.
    */
-  private PerField getOrAddPerField(String fieldName, boolean reserved) {
+  private PerField getOrAddPerField(String fieldName) {
     final int hashPos = fieldName.hashCode() & hashMask;
     PerField pf = fieldHash[hashPos];
     while (pf != null && pf.fieldName.equals(fieldName) == false) {
@@ -853,8 +840,7 @@ final class IndexingChain implements Accountable {
               schema,
               indexWriterConfig.getSimilarity(),
               indexWriterConfig.getInfoStream(),
-              indexWriterConfig.getAnalyzer(),
-              reserved);
+              indexWriterConfig.getAnalyzer());
       pf.next = fieldHash[hashPos];
       fieldHash[hashPos] = pf;
       totalFieldCount++;
@@ -1128,7 +1114,6 @@ final class IndexingChain implements Accountable {
     final String fieldName;
     final int indexCreatedVersionMajor;
     final FieldSchema schema;
-    final boolean reserved;
     FieldInfo fieldInfo;
     final Similarity similarity;
 
@@ -1160,7 +1145,13 @@ final class IndexingChain implements Accountable {
     private final Analyzer analyzer;
     private boolean first; // first in a document
 
-    private FieldType frozenFieldType;
+    /**
+     * Allows IndexingChain to skip schema validation if fields keep using the same frozen field
+     * type
+     */
+    private FieldType validatedFrozenFieldType;
+
+    private IndexableFieldType candidateFieldType;
 
     PerField(
         String fieldName,
@@ -1168,32 +1159,42 @@ final class IndexingChain implements Accountable {
         FieldSchema schema,
         Similarity similarity,
         InfoStream infoStream,
-        Analyzer analyzer,
-        boolean reserved) {
+        Analyzer analyzer) {
       this.fieldName = fieldName;
       this.indexCreatedVersionMajor = indexCreatedVersionMajor;
       this.schema = schema;
       this.similarity = similarity;
       this.infoStream = infoStream;
       this.analyzer = analyzer;
-      this.reserved = reserved;
     }
 
     void reset(int docId, IndexableFieldType fieldType) {
       first = true;
-      if (fieldType == frozenFieldType) {
+      if (fieldInfo == null) {
+        // The first time we encounter this field in a segment propose a frozen field to optimize
+        // the validation step. This will be promoted in trySetValidatedFrozenFieldType if it is
+        // frozen and valid.
+        candidateFieldType = fieldType;
+      }
+      if (fieldType == validatedFrozenFieldType) {
         schema.resetJustDocId(docId);
       } else {
-        maybeCacheFrozenFieldType(fieldType);
+        // Encountered new FieldType. Deoptimize the schema validation skip.
+        validatedFrozenFieldType = null;
         schema.reset(docId);
       }
     }
 
-    void maybeCacheFrozenFieldType(IndexableFieldType fieldType) {
-      // Only cache a new frozen field type if no prior cache exists.
-      // If a prior cache existed but didn't match, null it out to force validation this document.
-      frozenFieldType =
-          frozenFieldType == null && fieldType instanceof FieldType ft && ft.isFrozen() ? ft : null;
+    boolean multiValueForcesDeoptimize(IndexableFieldType fieldType) {
+      return validatedFrozenFieldType != null && fieldType != validatedFrozenFieldType;
+    }
+
+    void trySetValidatedFrozenFieldType() {
+      assert fieldInfo != null;
+      if (candidateFieldType instanceof FieldType ft && ft.isFrozen()) {
+        validatedFrozenFieldType = ft;
+      }
+      candidateFieldType = null;
     }
 
     void setFieldInfo(FieldInfo fieldInfo) {
