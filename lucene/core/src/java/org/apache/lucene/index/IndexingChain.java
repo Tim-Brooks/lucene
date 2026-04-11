@@ -600,8 +600,7 @@ final class IndexingChain implements Accountable {
       for (IndexableField field : document) {
         final String fieldName = field.name();
         final IndexableFieldType fieldType = field.fieldType();
-        PerField pf =
-            getOrAddPerField(fieldName);
+        PerField pf = getOrAddPerField(fieldName);
         if (pf == parentPf) {
           throw new IllegalArgumentException(
               "\"" + fieldName + "\" is a reserved field and should not be added to any document");
