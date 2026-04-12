@@ -88,6 +88,9 @@ final class IndexingChain implements Accountable {
 
   // Holds fields seen in each document
   private PerField[] fields = new PerField[1];
+  // Buffered slow-path field instances needing deferred init/validate + processing
+  private IndexableField[] deferredDocFields = new IndexableField[2];
+  private PerField[] deferredDocFieldPfs = new PerField[2];
   private final InfoStream infoStream;
   private final ByteBlockPool.Allocator byteBlockAllocator;
   private final LiveIndexWriterConfig indexWriterConfig;
@@ -571,6 +574,7 @@ final class IndexingChain implements Accountable {
       throws IOException {
     int indexedFieldCount = 0; // number of unique fields indexed with postings
     long fieldGen = nextFieldGen++;
+    int numDeferredDocFields = 0;
 
     termsHash.startDocument();
     startStoredFields(docID);
@@ -601,19 +605,44 @@ final class IndexingChain implements Accountable {
         if (pf.fieldGen != fieldGen) { // first time we see this field in this document
           pf.fieldGen = fieldGen;
           pf.reset(docID, fieldType);
-          if (pf.validatedFrozenFieldType == null) {
-            initOrValidateField(fieldName, pf, fieldType);
-          }
         } else if (pf.multiValueForcesDeoptimize(fieldType)) {
+          // Multi-valued field with a different field type than the cached frozen type.
+          // Drop the validated frozen field type to force the validation path.
           pf.validatedFrozenFieldType = null;
-          initOrValidateField(fieldName, pf, fieldType);
-        } else if (pf.validatedFrozenFieldType == null) {
-          updateDocFieldSchema(fieldName, pf.schema, fieldType);
         }
 
-        if (processField(docID, field, pf)) {
-          fields[indexedFieldCount] = pf;
-          indexedFieldCount++;
+        if (pf.validatedFrozenFieldType != null) {
+          // Fast path: field type matches the validated frozen type, process immediately
+          if (processField(docID, field, pf)) {
+            fields[indexedFieldCount] = pf;
+            indexedFieldCount++;
+          }
+        } else {
+          // Slow path: build schema, buffer for deferred processing after init/validate
+          updateDocFieldSchema(fieldName, pf.schema, fieldType);
+          numDeferredDocFields = addDeferredDocField(field, pf, numDeferredDocFields);
+        }
+      }
+
+      if (numDeferredDocFields > 0) {
+        // Init/validate + process deferred fields now that the full schema has been built.
+        // For multi-valued slow-path fields, assertSameSchema may run more than once per
+        // unique field — this is redundant but inexpensive (just comparisons).
+        for (int i = 0; i < numDeferredDocFields; i++) {
+          PerField pf = deferredDocFieldPfs[i];
+          if (pf.fieldInfo == null) {
+            initializeFieldInfo(pf);
+            pf.trySetValidatedFrozenFieldType();
+          } else {
+            pf.schema.assertSameSchema(pf.fieldInfo);
+          }
+        }
+        for (int i = 0; i < numDeferredDocFields; i++) {
+          if (processField(docID, deferredDocFields[i], deferredDocFieldPfs[i])) {
+            fields[indexedFieldCount] = deferredDocFieldPfs[i];
+            indexedFieldCount++;
+          }
+          deferredDocFields[i] = null;
         }
       }
     } finally {
@@ -635,15 +664,14 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  private void initOrValidateField(String fieldName, PerField pf, IndexableFieldType fieldType)
-      throws IOException {
-    updateDocFieldSchema(fieldName, pf.schema, fieldType);
-    if (pf.fieldInfo == null) {
-      initializeFieldInfo(pf);
-      pf.trySetValidatedFrozenFieldType();
-    } else {
-      pf.schema.assertSameSchema(pf.fieldInfo);
+  private int addDeferredDocField(IndexableField field, PerField pf, int count) {
+    if (count >= deferredDocFields.length) {
+      deferredDocFields = ArrayUtil.grow(deferredDocFields, count + 1);
+      deferredDocFieldPfs = ArrayUtil.grow(deferredDocFieldPfs, count + 1);
     }
+    deferredDocFields[count] = field;
+    deferredDocFieldPfs[count] = pf;
+    return count + 1;
   }
 
   private void initializeFieldInfo(PerField pf) throws IOException {
