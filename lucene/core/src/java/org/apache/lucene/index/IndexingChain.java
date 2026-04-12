@@ -88,7 +88,6 @@ final class IndexingChain implements Accountable {
 
   // Holds fields seen in each document
   private PerField[] fields = new PerField[1];
-  private PerField[] docFields = new PerField[2];
   private final InfoStream infoStream;
   private final ByteBlockPool.Allocator byteBlockAllocator;
   private final LiveIndexWriterConfig indexWriterConfig;
@@ -570,18 +569,9 @@ final class IndexingChain implements Accountable {
   void processDocument(
       int docID, Iterable<? extends IndexableField> document, boolean lastDocInBlock)
       throws IOException {
-    // number of unique fields by name which need to be init in segment or full validation
-    int fieldsNeedInitOrValidate = 0;
     int indexedFieldCount = 0; // number of unique fields indexed with postings
     long fieldGen = nextFieldGen++;
-    int docFieldIdx = 0;
 
-    // NOTE: we need two passes here, in case there are
-    // multi-valued fields, because we must process all
-    // instances of a given field at once, since the
-    // analyzer is free to reuse TokenStream across fields
-    // (i.e., we cannot have more than one TokenStream
-    // running "at once"):
     termsHash.startDocument();
     startStoredFields(docID);
     try {
@@ -591,12 +581,15 @@ final class IndexingChain implements Accountable {
       if (lastDocInBlock && parentPf != null) {
         parentPf.schema.resetJustDocId(docID);
         if (parentPf.fieldInfo == null) {
-          fields[fieldsNeedInitOrValidate++] = parentPf;
+          initializeFieldInfo(parentPf);
+          parentPf.trySetValidatedFrozenFieldType();
+        }
+        if (processField(docID, parentField, parentPf)) {
+          fields[indexedFieldCount] = parentPf;
+          indexedFieldCount++;
         }
       }
 
-      // 1st pass over doc fields – verify that doc schema matches the index schema
-      // build schema for each unique doc field
       for (IndexableField field : document) {
         final String fieldName = field.name();
         final IndexableFieldType fieldType = field.fieldType();
@@ -609,39 +602,19 @@ final class IndexingChain implements Accountable {
           pf.fieldGen = fieldGen;
           pf.reset(docID, fieldType);
           if (pf.validatedFrozenFieldType == null) {
-            fields[fieldsNeedInitOrValidate++] = pf;
+            initOrValidateField(fieldName, pf, fieldType);
           }
         } else if (pf.multiValueForcesDeoptimize(fieldType)) {
-          // Multi-valued field with a different field type than the cached frozen type.
-          // Drop the validated frozen field type to force the validation path.
           pf.validatedFrozenFieldType = null;
-          fields[fieldsNeedInitOrValidate++] = pf;
-        }
-        if (docFieldIdx >= docFields.length) oversizeDocFields();
-        docFields[docFieldIdx++] = pf;
-        if (pf.validatedFrozenFieldType == null) {
+          initOrValidateField(fieldName, pf, fieldType);
+        } else if (pf.validatedFrozenFieldType == null) {
           updateDocFieldSchema(fieldName, pf.schema, fieldType);
         }
-      }
 
-      if (fieldsNeedInitOrValidate > 0) {
-        initAndValidateFields(fieldsNeedInitOrValidate);
-      }
-
-      // 2nd pass – index parent field first, then document fields
-      if (lastDocInBlock && parentPf != null) {
-        if (processField(docID, parentField, parentPf)) {
-          fields[indexedFieldCount] = parentPf;
+        if (processField(docID, field, pf)) {
+          fields[indexedFieldCount] = pf;
           indexedFieldCount++;
         }
-      }
-      docFieldIdx = 0;
-      for (IndexableField field : document) {
-        if (processField(docID, field, docFields[docFieldIdx])) {
-          fields[indexedFieldCount] = docFields[docFieldIdx];
-          indexedFieldCount++;
-        }
-        docFieldIdx++;
       }
     } finally {
       if (hasHitAbortingException == false) {
@@ -650,7 +623,6 @@ final class IndexingChain implements Accountable {
           fields[i].finish(docID);
         }
         finishStoredFields();
-        // TODO: for broken docs, optimize termsHash.finishDocument
         try {
           termsHash.finishDocument(docID);
         } catch (Throwable th) {
@@ -663,28 +635,15 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  private void initAndValidateFields(int fieldCount) throws IOException {
-    // For each field, if it's the first time we see this field in this segment,
-    // initialize its FieldInfo.
-    // If we have already seen this field, verify that its schema
-    // within the current doc matches its schema in the index.
-    for (int i = 0; i < fieldCount; i++) {
-      PerField pf = fields[i];
-      if (pf.fieldInfo == null) {
-        initializeFieldInfo(pf);
-        pf.trySetValidatedFrozenFieldType();
-      } else {
-        pf.schema.assertSameSchema(pf.fieldInfo);
-      }
+  private void initOrValidateField(String fieldName, PerField pf, IndexableFieldType fieldType)
+      throws IOException {
+    updateDocFieldSchema(fieldName, pf.schema, fieldType);
+    if (pf.fieldInfo == null) {
+      initializeFieldInfo(pf);
+      pf.trySetValidatedFrozenFieldType();
+    } else {
+      pf.schema.assertSameSchema(pf.fieldInfo);
     }
-  }
-
-  private void oversizeDocFields() {
-    PerField[] newDocFields =
-        new PerField
-            [ArrayUtil.oversize(docFields.length + 1, RamUsageEstimator.NUM_BYTES_OBJECT_REF)];
-    System.arraycopy(docFields, 0, newDocFields, 0, docFields.length);
-    docFields = newDocFields;
   }
 
   private void initializeFieldInfo(PerField pf) throws IOException {
