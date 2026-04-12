@@ -38,8 +38,12 @@ import org.apache.lucene.codecs.NormsFormat;
 import org.apache.lucene.codecs.NormsProducer;
 import org.apache.lucene.codecs.PointsFormat;
 import org.apache.lucene.codecs.PointsWriter;
+import org.apache.lucene.document.Batch;
+import org.apache.lucene.document.BinaryColumn;
+import org.apache.lucene.document.Column;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.KnnByteVectorField;
+import org.apache.lucene.document.LongColumn;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredValue;
@@ -632,6 +636,127 @@ final class IndexingChain implements Accountable {
           throw th;
         }
       }
+    }
+  }
+
+  /**
+   * Process a column-oriented batch of documents. Iterates the batch's columns, validates each
+   * column's field type, and feeds values to the appropriate DocValuesWriter.
+   *
+   * @param baseDocID the segment-level doc ID for the first document in the batch (batch-local doc
+   *     0 maps to this value)
+   * @param batch the column-oriented batch
+   */
+  void processBatch(int baseDocID, Batch batch) throws IOException {
+    final int numDocs = batch.numDocs();
+
+    for (Column column : batch.columns()) {
+      final String fieldName = column.name();
+      final IndexableFieldType fieldType = column.fieldType();
+      final DocValuesType dvType = fieldType.docValuesType();
+
+      if (dvType == DocValuesType.NONE) {
+        throw new IllegalArgumentException(
+            "Column \"" + fieldName + "\" must have a non-NONE docValuesType");
+      }
+
+      // Get or create the PerField, and validate/initialize schema
+      PerField pf = getOrAddPerField(fieldName);
+      validateColumnSchema(fieldName, pf, fieldType);
+
+      // Iterate the column's cursor and feed values to the DocValuesWriter
+      if (column instanceof LongColumn longCol) {
+        processLongColumn(baseDocID, numDocs, longCol, pf, dvType);
+      } else if (column instanceof BinaryColumn binaryCol) {
+        processBinaryColumn(baseDocID, numDocs, binaryCol, pf, dvType);
+      } else {
+        throw new IllegalArgumentException(
+            "Unknown column type: " + column.getClass().getName());
+      }
+    }
+  }
+
+  private void validateColumnSchema(
+      String fieldName, PerField pf, IndexableFieldType fieldType) throws IOException {
+    updateDocFieldSchema(fieldName, pf.schema, fieldType);
+    if (pf.fieldInfo == null) {
+      initializeFieldInfo(pf);
+    } else {
+      pf.schema.assertSameSchema(pf.fieldInfo);
+    }
+  }
+
+  private void processLongColumn(
+      int baseDocID, int numDocs, LongColumn column, PerField pf, DocValuesType dvType) {
+    switch (dvType) {
+      case NUMERIC -> {
+        NumericDocValuesWriter writer = (NumericDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          writer.addValue(baseDocID + batchDocID, column.longValue());
+        }
+      }
+      case SORTED_NUMERIC -> {
+        SortedNumericDocValuesWriter writer = (SortedNumericDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          writer.addValue(baseDocID + batchDocID, column.longValue());
+        }
+      }
+      default ->
+          throw new IllegalArgumentException(
+              "LongColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
+    }
+  }
+
+  private void processBinaryColumn(
+      int baseDocID, int numDocs, BinaryColumn column, PerField pf, DocValuesType dvType) {
+    switch (dvType) {
+      case BINARY -> {
+        BinaryDocValuesWriter writer = (BinaryDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          writer.addValue(baseDocID + batchDocID, column.binaryValue());
+        }
+      }
+      case SORTED -> {
+        SortedDocValuesWriter writer = (SortedDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          writer.addValue(baseDocID + batchDocID, column.binaryValue());
+        }
+      }
+      case SORTED_SET -> {
+        SortedSetDocValuesWriter writer = (SortedSetDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          writer.addValue(baseDocID + batchDocID, column.binaryValue());
+        }
+      }
+      default ->
+          throw new IllegalArgumentException(
+              "BinaryColumn \""
+                  + column.name()
+                  + "\" has incompatible docValuesType: "
+                  + dvType);
+    }
+  }
+
+  private static void checkDocID(Column column, int batchDocID, int numDocs) {
+    if (batchDocID < 0 || batchDocID >= numDocs) {
+      throw new IllegalArgumentException(
+          "Column \""
+              + column.name()
+              + "\" returned batch doc-id "
+              + batchDocID
+              + " which is out of range [0, "
+              + numDocs
+              + ")");
     }
   }
 
