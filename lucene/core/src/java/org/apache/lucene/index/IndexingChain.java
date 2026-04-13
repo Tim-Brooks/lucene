@@ -23,6 +23,7 @@ import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
+import java.io.Reader;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -42,6 +43,7 @@ import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.BinaryColumn;
 import org.apache.lucene.document.Column;
 import org.apache.lucene.document.FieldType;
+import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
 import org.apache.lucene.document.LongColumn;
 import org.apache.lucene.document.KnnFloatVectorField;
@@ -678,6 +680,7 @@ final class IndexingChain implements Accountable {
    */
   void processBatch(int baseDocID, Batch batch) throws IOException {
     final int numDocs = batch.numDocs();
+    boolean hasRowColumns = false;
 
     // First pass: validate all column schemas and initialize field infos
     for (Column column : batch.columns()) {
@@ -685,11 +688,18 @@ final class IndexingChain implements Accountable {
       final IndexableFieldType fieldType = column.fieldType();
 
       if (fieldType.docValuesType() == DocValuesType.NONE
-          && fieldType.pointDimensionCount() == 0) {
+          && fieldType.pointDimensionCount() == 0
+          && fieldType.stored() == false
+          && fieldType.indexOptions() == IndexOptions.NONE) {
         throw new IllegalArgumentException(
             "Column \""
                 + fieldName
-                + "\" must have a non-NONE docValuesType or point dimensions");
+                + "\" must have a non-NONE docValuesType, point dimensions, be stored,"
+                + " or have index options");
+      }
+
+      if (fieldType.stored() || fieldType.indexOptions() != IndexOptions.NONE) {
+        hasRowColumns = true;
       }
 
       PerField pf = getOrAddPerField(fieldName);
@@ -710,9 +720,18 @@ final class IndexingChain implements Accountable {
       }
     }
 
-    // Second pass: index column data
+    // Row-oriented pass: process columns that need per-document lifecycle (stored or inverted),
+    // also writing their doc values and points in the same pass (cursors are single-use).
+    if (hasRowColumns) {
+      processRowColumns(baseDocID, numDocs, batch.columns());
+    }
+
+    // Column-oriented pass: index columns that don't need per-document lifecycle
     for (Column column : batch.columns()) {
       final IndexableFieldType fieldType = column.fieldType();
+      if (fieldType.stored() || fieldType.indexOptions() != IndexOptions.NONE) {
+        continue; // already consumed in the row pass
+      }
       PerField pf = getOrAddPerField(column.name());
 
       if (column instanceof LongColumn longCol) {
@@ -723,6 +742,191 @@ final class IndexingChain implements Accountable {
         throw new IllegalArgumentException(
             "Unknown column type: " + column.getClass().getName());
       }
+    }
+  }
+
+  /**
+   * Processes columns that need per-document lifecycle (stored or inverted) in a doc-by-doc merged
+   * iteration. Uses {@link #processField} for each entry, so all field features (inverted, stored,
+   * doc values, points) are handled by the same code path as {@link #processDocument}.
+   */
+  private void processRowColumns(int baseDocID, int numDocs, Iterable<Column> columns)
+      throws IOException {
+    // Collect row-oriented columns into parallel arrays
+    int numRowCols = 0;
+    ColumnFieldAdapter[] adapters = new ColumnFieldAdapter[4];
+    PerField[] rowPfs = new PerField[4];
+    int[] nextDocs = new int[4];
+    boolean hasInverted = false;
+
+    for (Column column : columns) {
+      IndexableFieldType fieldType = column.fieldType();
+      if (fieldType.stored() == false && fieldType.indexOptions() == IndexOptions.NONE) {
+        continue;
+      }
+      if (numRowCols >= adapters.length) {
+        adapters = ArrayUtil.grow(adapters, numRowCols + 1);
+        rowPfs = ArrayUtil.grow(rowPfs, numRowCols + 1);
+        nextDocs = ArrayUtil.grow(nextDocs, numRowCols + 1);
+      }
+      adapters[numRowCols] = new ColumnFieldAdapter(column);
+      rowPfs[numRowCols] = getOrAddPerField(column.name());
+      nextDocs[numRowCols] = column.nextDoc();
+      if (fieldType.indexOptions() != IndexOptions.NONE) {
+        hasInverted = true;
+      }
+      numRowCols++;
+    }
+
+    // Merge-iterate doc-by-doc across all row columns
+    int indexedFieldCount = 0;
+    long fieldGen = nextFieldGen++;
+    while (true) {
+      // Find the minimum doc across all cursors
+      int minDoc = Column.NO_MORE_DOCS;
+      for (int i = 0; i < numRowCols; i++) {
+        if (nextDocs[i] < minDoc) {
+          minDoc = nextDocs[i];
+        }
+      }
+      if (minDoc == Column.NO_MORE_DOCS) {
+        break;
+      }
+      if (minDoc < 0 || minDoc >= numDocs) {
+        throw new IllegalArgumentException(
+            "Row column returned batch doc-id "
+                + minDoc
+                + " which is out of range [0, "
+                + numDocs
+                + ")");
+      }
+
+      int segDocID = baseDocID + minDoc;
+      indexedFieldCount = 0;
+      if (hasInverted) {
+        termsHash.startDocument();
+      }
+      startStoredFields(segDocID);
+      try {
+        for (int i = 0; i < numRowCols; i++) {
+          while (nextDocs[i] == minDoc) {
+            PerField pf = rowPfs[i];
+            if (pf.fieldGen != fieldGen) {
+              pf.fieldGen = fieldGen;
+              pf.reset(segDocID, adapters[i].column.fieldType());
+            }
+            if (processField(segDocID, adapters[i], pf)) {
+              fields[indexedFieldCount] = pf;
+              indexedFieldCount++;
+            }
+            nextDocs[i] = adapters[i].column.nextDoc();
+          }
+        }
+      } finally {
+        if (hasHitAbortingException == false) {
+          for (int i = 0; i < indexedFieldCount; i++) {
+            fields[i].finish(segDocID);
+          }
+          finishStoredFields();
+          if (hasInverted) {
+            try {
+              termsHash.finishDocument(segDocID);
+            } catch (Throwable th) {
+              abortingExceptionConsumer.accept(th);
+              throw th;
+            }
+          }
+        }
+      }
+      fieldGen = nextFieldGen++;
+    }
+  }
+
+  /**
+   * Lightweight adapter that presents a column's current cursor value as an {@link IndexableField},
+   * so it can be passed to {@link #processField}. One instance is reused per column across all
+   * documents.
+   */
+  private static class ColumnFieldAdapter implements IndexableField {
+    final Column column;
+    private final StoredValue reusableStoredValue;
+    private final boolean tokenized;
+
+    ColumnFieldAdapter(Column column) {
+      this.column = column;
+      this.tokenized = column.fieldType().tokenized();
+      if (column.fieldType().stored()) {
+        this.reusableStoredValue =
+            (column instanceof LongColumn) ? new StoredValue(0L) : new StoredValue(new BytesRef());
+      } else {
+        this.reusableStoredValue = null;
+      }
+    }
+
+    @Override
+    public String name() {
+      return column.name();
+    }
+
+    @Override
+    public IndexableFieldType fieldType() {
+      return column.fieldType();
+    }
+
+    @Override
+    public BytesRef binaryValue() {
+      return (column instanceof BinaryColumn bc) ? bc.binaryValue() : null;
+    }
+
+    @Override
+    public String stringValue() {
+      if (tokenized && column instanceof BinaryColumn bc) {
+        BytesRef ref = bc.binaryValue();
+        return new String(ref.bytes, ref.offset, ref.length, java.nio.charset.StandardCharsets.UTF_8);
+      }
+      return null;
+    }
+
+    @Override
+    public Reader readerValue() {
+      return null;
+    }
+
+    @Override
+    public Number numericValue() {
+      return (column instanceof LongColumn lc) ? lc.longValue() : null;
+    }
+
+    @Override
+    public StoredValue storedValue() {
+      if (reusableStoredValue == null) {
+        return null;
+      }
+      if (column instanceof LongColumn lc) {
+        reusableStoredValue.setLongValue(lc.longValue());
+      } else if (column instanceof BinaryColumn bc) {
+        reusableStoredValue.setBinaryValue(bc.binaryValue());
+      }
+      return reusableStoredValue;
+    }
+
+    @Override
+    public InvertableType invertableType() {
+      if (column.fieldType().indexOptions() == IndexOptions.NONE) {
+        return null;
+      }
+      if (column instanceof BinaryColumn) {
+        return tokenized ? InvertableType.TOKEN_STREAM : InvertableType.BINARY;
+      }
+      return null;
+    }
+
+    @Override
+    public TokenStream tokenStream(Analyzer analyzer, TokenStream reuse) {
+      if (tokenized && column instanceof BinaryColumn) {
+        return analyzer.tokenStream(column.name(), stringValue());
+      }
+      return null;
     }
   }
 

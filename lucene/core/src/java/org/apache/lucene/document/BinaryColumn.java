@@ -43,14 +43,6 @@ public abstract class BinaryColumn extends Column {
   }
 
   /**
-   * Advances to the next doc-id that has a value and returns it, or {@link #NO_MORE_DOCS} if there
-   * are no more values. Doc-ids are batch-local (0 to numDocs-1).
-   *
-   * @return the next batch-local doc-id, or {@link #NO_MORE_DOCS}
-   */
-  public abstract int nextDoc();
-
-  /**
    * Returns the binary value for the current cursor position. The returned {@link BytesRef} is only
    * valid until the next call to {@link #nextDoc()}. Must only be called after {@link #nextDoc()}
    * returns a valid doc-id.

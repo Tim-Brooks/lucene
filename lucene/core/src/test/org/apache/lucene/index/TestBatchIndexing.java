@@ -29,9 +29,14 @@ import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
+import org.apache.lucene.document.Document;
+import org.apache.lucene.document.StringField;
+import org.apache.lucene.document.TextField;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.IndexSearcher;
+import org.apache.lucene.search.TermQuery;
 import org.apache.lucene.store.Directory;
+import org.apache.lucene.tests.analysis.MockAnalyzer;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.BytesRef;
 
@@ -334,6 +339,410 @@ public class TestBatchIndexing extends LuceneTestCase {
     IndexSearcher searcher = new IndexSearcher(r);
     assertEquals(1, searcher.count(IntPoint.newExactQuery("point", 42)));
     assertEquals(0, searcher.count(IntPoint.newExactQuery("point", 0)));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testStoredLongColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored + NUMERIC doc values
+    FieldType storedNumericType = new FieldType();
+    storedNumericType.setStored(true);
+    storedNumericType.setDocValuesType(DocValuesType.NUMERIC);
+    storedNumericType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    long[] values = {100, 200, 300};
+    w.addBatch(
+        simpleBatch(3, new ArrayLongColumn("val", storedNumericType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(values[i], doc.getField("val").numericValue().longValue());
+    }
+
+    // Verify doc values
+    NumericDocValues dv = leaf.getNumericDocValues("val");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testStoredBinaryColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored + SORTED doc values
+    FieldType storedSortedType = new FieldType();
+    storedSortedType.setStored(true);
+    storedSortedType.setDocValuesType(DocValuesType.SORTED);
+    storedSortedType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("aaa"), newBytesRef("bbb"), newBytesRef("ccc")};
+    w.addBatch(
+        simpleBatch(3, new ArrayBinaryColumn("val", storedSortedType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(values[i], doc.getField("val").binaryValue());
+    }
+
+    // Verify doc values
+    SortedDocValues dv = leaf.getSortedDocValues("val");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.lookupOrd(dv.ordValue()));
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testStoredOnlyColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored only — no doc values, no points
+    FieldType storedOnlyType = new FieldType();
+    storedOnlyType.setStored(true);
+    storedOnlyType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    long[] values = {10, 20, 30};
+    w.addBatch(
+        simpleBatch(3, new ArrayLongColumn("stored", storedOnlyType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(values[i], doc.getField("stored").numericValue().longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testMixedStoredAndNonStoredColumns() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType storedNumericType = new FieldType();
+    storedNumericType.setStored(true);
+    storedNumericType.setDocValuesType(DocValuesType.NUMERIC);
+    storedNumericType.freeze();
+
+    int[] allDocs = {0, 1, 2};
+    long[] storedValues = {100, 200, 300};
+    long[] dvOnlyValues = {1, 2, 3};
+    w.addBatch(
+        simpleBatch(
+            3,
+            new ArrayLongColumn("stored_field", storedNumericType, allDocs, storedValues),
+            new ArrayLongColumn(
+                "dv_only", NumericDocValuesField.TYPE, allDocs, dvOnlyValues)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    // Verify stored field
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(storedValues[i], doc.getField("stored_field").numericValue().longValue());
+      assertNull(doc.getField("dv_only")); // non-stored column should not appear
+    }
+
+    // Verify both doc values columns
+    NumericDocValues storedDv = leaf.getNumericDocValues("stored_field");
+    NumericDocValues dvOnly = leaf.getNumericDocValues("dv_only");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, storedDv.nextDoc());
+      assertEquals(storedValues[i], storedDv.longValue());
+      assertEquals(i, dvOnly.nextDoc());
+      assertEquals(dvOnlyValues[i], dvOnly.longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testStoredPointsColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored + points
+    FieldType storedPointType = new FieldType();
+    storedPointType.setStored(true);
+    storedPointType.setDimensions(1, Integer.BYTES);
+    storedPointType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {IntPoint.pack(10), IntPoint.pack(20), IntPoint.pack(30)};
+    w.addBatch(
+        simpleBatch(3, new ArrayBinaryColumn("pt", storedPointType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(values[i], doc.getField("pt").binaryValue());
+    }
+
+    // Verify points
+    IndexSearcher searcher = new IndexSearcher(r);
+    assertEquals(1, searcher.count(IntPoint.newExactQuery("pt", 10)));
+    assertEquals(3, searcher.count(IntPoint.newRangeQuery("pt", 10, 30)));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testInvertedColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // StringField-like: DOCS, omitNorms, non-tokenized
+    FieldType stringType = new FieldType();
+    stringType.setIndexOptions(IndexOptions.DOCS);
+    stringType.setOmitNorms(true);
+    stringType.setTokenized(false);
+    stringType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("alpha"), newBytesRef("beta"), newBytesRef("alpha")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("tag", stringType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    assertEquals(2, searcher.count(new TermQuery(new Term("tag", "alpha"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("tag", "beta"))));
+    assertEquals(0, searcher.count(new TermQuery(new Term("tag", "gamma"))));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testInvertedWithDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // Inverted + SORTED doc values (like a StringField with doc values)
+    FieldType invertedDvType = new FieldType();
+    invertedDvType.setIndexOptions(IndexOptions.DOCS);
+    invertedDvType.setOmitNorms(true);
+    invertedDvType.setTokenized(false);
+    invertedDvType.setDocValuesType(DocValuesType.SORTED);
+    invertedDvType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("x"), newBytesRef("y"), newBytesRef("x")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", invertedDvType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index
+    assertEquals(2, searcher.count(new TermQuery(new Term("field", "x"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "y"))));
+
+    // Verify doc values
+    LeafReader leaf = getOnlyLeafReader(r);
+    SortedDocValues dv = leaf.getSortedDocValues("field");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.lookupOrd(dv.ordValue()));
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testInvertedWithStored() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // Inverted + stored (like StringField with Store.YES)
+    FieldType invertedStoredType = new FieldType(StringField.TYPE_STORED);
+    invertedStoredType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("aaa"), newBytesRef("bbb"), newBytesRef("ccc")};
+    w.addBatch(
+        simpleBatch(3, new ArrayBinaryColumn("field", invertedStoredType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "aaa"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "bbb"))));
+
+    // Verify stored fields
+    LeafReader leaf = getOnlyLeafReader(r);
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      Document doc = storedFields.document(i);
+      assertEquals(values[i], doc.getField("field").binaryValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testInvertedWithStoredAndDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // Inverted + stored + SORTED doc values
+    FieldType allType = new FieldType();
+    allType.setIndexOptions(IndexOptions.DOCS);
+    allType.setOmitNorms(true);
+    allType.setTokenized(false);
+    allType.setStored(true);
+    allType.setDocValuesType(DocValuesType.SORTED);
+    allType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("x"), newBytesRef("y"), newBytesRef("z")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", allType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "x"))));
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      assertEquals(values[i], storedFields.document(i).getField("field").binaryValue());
+    }
+
+    // Verify doc values
+    SortedDocValues dv = leaf.getSortedDocValues("field");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.lookupOrd(dv.ordValue()));
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testInvertedSparse() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType stringType = new FieldType();
+    stringType.setIndexOptions(IndexOptions.DOCS);
+    stringType.setOmitNorms(true);
+    stringType.setTokenized(false);
+    stringType.freeze();
+
+    // Only doc 1 out of 3 has a term
+    int[] docIds = {1};
+    BytesRef[] values = {newBytesRef("found")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("tag", stringType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    assertEquals(1, searcher.count(new TermQuery(new Term("tag", "found"))));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testTokenizedColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriterConfig config = newIndexWriterConfig(new MockAnalyzer(random()));
+    IndexWriter w = new IndexWriter(dir, config);
+
+    // TextField-like: tokenized, DOCS_AND_FREQS_AND_POSITIONS
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {
+      newBytesRef("quick brown fox"),
+      newBytesRef("lazy brown dog"),
+      newBytesRef("quick fox jumps")
+    };
+    w.addBatch(
+        simpleBatch(
+            3, new ArrayBinaryColumn("text", TextField.TYPE_NOT_STORED, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Each word was tokenized — verify individual terms
+    assertEquals(2, searcher.count(new TermQuery(new Term("text", "quick"))));
+    assertEquals(2, searcher.count(new TermQuery(new Term("text", "brown"))));
+    assertEquals(2, searcher.count(new TermQuery(new Term("text", "fox"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("text", "lazy"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("text", "dog"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("text", "jumps"))));
+    assertEquals(0, searcher.count(new TermQuery(new Term("text", "missing"))));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testTokenizedWithStored() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriterConfig config = newIndexWriterConfig(new MockAnalyzer(random()));
+    IndexWriter w = new IndexWriter(dir, config);
+
+    int[] docIds = {0, 1};
+    BytesRef[] values = {newBytesRef("hello world"), newBytesRef("goodbye world")};
+    w.addBatch(
+        simpleBatch(2, new ArrayBinaryColumn("text", TextField.TYPE_STORED, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify tokenized search
+    assertEquals(2, searcher.count(new TermQuery(new Term("text", "world"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("text", "hello"))));
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    assertEquals(values[0], storedFields.document(0).getField("text").binaryValue());
+    assertEquals(values[1], storedFields.document(1).getField("text").binaryValue());
 
     r.close();
     w.close();
