@@ -679,25 +679,46 @@ final class IndexingChain implements Accountable {
   void processBatch(int baseDocID, Batch batch) throws IOException {
     final int numDocs = batch.numDocs();
 
+    // First pass: validate all column schemas and initialize field infos
     for (Column column : batch.columns()) {
       final String fieldName = column.name();
       final IndexableFieldType fieldType = column.fieldType();
-      final DocValuesType dvType = fieldType.docValuesType();
 
-      if (dvType == DocValuesType.NONE) {
+      if (fieldType.docValuesType() == DocValuesType.NONE
+          && fieldType.pointDimensionCount() == 0) {
         throw new IllegalArgumentException(
-            "Column \"" + fieldName + "\" must have a non-NONE docValuesType");
+            "Column \""
+                + fieldName
+                + "\" must have a non-NONE docValuesType or point dimensions");
       }
 
-      // Get or create the PerField, and validate/initialize schema
       PerField pf = getOrAddPerField(fieldName);
       validateColumnSchema(fieldName, pf, fieldType);
+    }
 
-      // Iterate the column's cursor and feed values to the DocValuesWriter
+    // Index the parent field for every document (each batch doc is an individual document,
+    // not part of a block, so every doc is its own parent).
+    if (parentPf != null) {
+      if (parentPf.fieldInfo == null) {
+        initializeFieldInfo(parentPf);
+        parentPf.trySetValidatedFrozenFieldType();
+      }
+      final NumericDocValuesWriter parentWriter = (NumericDocValuesWriter) parentPf.docValuesWriter;
+      final long value = parentField.numericValue().longValue();
+      for (int i = 0; i < numDocs; i++) {
+        parentWriter.addValue(baseDocID + i, value);
+      }
+    }
+
+    // Second pass: index column data
+    for (Column column : batch.columns()) {
+      final IndexableFieldType fieldType = column.fieldType();
+      PerField pf = getOrAddPerField(column.name());
+
       if (column instanceof LongColumn longCol) {
-        processLongColumn(baseDocID, numDocs, longCol, pf, dvType);
+        processLongColumn(baseDocID, numDocs, longCol, pf, fieldType.docValuesType());
       } else if (column instanceof BinaryColumn binaryCol) {
-        processBinaryColumn(baseDocID, numDocs, binaryCol, pf, dvType);
+        processBinaryColumn(baseDocID, numDocs, binaryCol, pf, fieldType);
       } else {
         throw new IllegalArgumentException(
             "Unknown column type: " + column.getClass().getName());
@@ -710,6 +731,7 @@ final class IndexingChain implements Accountable {
     updateDocFieldSchema(fieldName, pf.schema, fieldType);
     if (pf.fieldInfo == null) {
       initializeFieldInfo(pf);
+      pf.trySetValidatedFrozenFieldType();
     } else {
       pf.schema.assertSameSchema(pf.fieldInfo);
     }
@@ -741,6 +763,24 @@ final class IndexingChain implements Accountable {
   }
 
   private void processBinaryColumn(
+      int baseDocID, int numDocs, BinaryColumn column, PerField pf, IndexableFieldType fieldType)
+      throws IOException {
+    final DocValuesType dvType = fieldType.docValuesType();
+    final boolean hasPoints = fieldType.pointDimensionCount() != 0;
+
+    if (dvType == DocValuesType.NONE && hasPoints) {
+      // Points only
+      processPointsColumn(baseDocID, numDocs, column, pf);
+    } else if (hasPoints) {
+      // Doc values + points
+      processDocValuesAndPointsColumn(baseDocID, numDocs, column, pf, dvType);
+    } else {
+      // Doc values only
+      processDocValuesColumn(baseDocID, numDocs, column, pf, dvType);
+    }
+  }
+
+  private void processDocValuesColumn(
       int baseDocID, int numDocs, BinaryColumn column, PerField pf, DocValuesType dvType) {
     switch (dvType) {
       case BINARY -> {
@@ -765,6 +805,63 @@ final class IndexingChain implements Accountable {
         while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.binaryValue());
+        }
+      }
+      default ->
+          throw new IllegalArgumentException(
+              "BinaryColumn \""
+                  + column.name()
+                  + "\" has incompatible docValuesType: "
+                  + dvType);
+    }
+  }
+
+  private void processPointsColumn(
+      int baseDocID, int numDocs, BinaryColumn column, PerField pf) throws IOException {
+    PointValuesWriter writer = pf.pointValuesWriter;
+    int batchDocID;
+    while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+      checkDocID(column, batchDocID, numDocs);
+      writer.addPackedValue(baseDocID + batchDocID, column.binaryValue());
+    }
+  }
+
+  private void processDocValuesAndPointsColumn(
+      int baseDocID, int numDocs, BinaryColumn column, PerField pf, DocValuesType dvType)
+      throws IOException {
+    PointValuesWriter pointWriter = pf.pointValuesWriter;
+    switch (dvType) {
+      case BINARY -> {
+        BinaryDocValuesWriter dvWriter = (BinaryDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          int segDocID = baseDocID + batchDocID;
+          BytesRef value = column.binaryValue();
+          dvWriter.addValue(segDocID, value);
+          pointWriter.addPackedValue(segDocID, value);
+        }
+      }
+      case SORTED -> {
+        SortedDocValuesWriter dvWriter = (SortedDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          int segDocID = baseDocID + batchDocID;
+          BytesRef value = column.binaryValue();
+          dvWriter.addValue(segDocID, value);
+          pointWriter.addPackedValue(segDocID, value);
+        }
+      }
+      case SORTED_SET -> {
+        SortedSetDocValuesWriter dvWriter = (SortedSetDocValuesWriter) pf.docValuesWriter;
+        int batchDocID;
+        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+          checkDocID(column, batchDocID, numDocs);
+          int segDocID = baseDocID + batchDocID;
+          BytesRef value = column.binaryValue();
+          dvWriter.addValue(segDocID, value);
+          pointWriter.addPackedValue(segDocID, value);
         }
       }
       default ->

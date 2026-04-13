@@ -308,19 +308,19 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
       final int numDocs = batch.numDocs();
       boolean allDocsIndexed = false;
       try {
-        // Reserve all doc IDs upfront
+        // Reserve all doc IDs upfront and account for them in numDocsInRAM immediately,
+        // so that deleteLastDocs in the finally block can correctly clean up on failure.
+        // Even on exception, the documents are still added (but marked deleted), matching
+        // the document path semantics.
         for (int i = 0; i < numDocs; i++) {
           reserveOneDoc();
         }
-
-        // The base doc ID for this batch within the segment
-        final int baseDocID = numDocsInRAM;
-        indexingChain.processBatch(baseDocID, batch);
         numDocsInRAM += numDocs;
-
         for (int i = 0; i < numDocs; i++) {
           onNewDocOnRAM.run();
         }
+
+        indexingChain.processBatch(docsInRamBefore, batch);
 
         if (numDocs > 1) {
           segmentInfo.setHasBlocks();
