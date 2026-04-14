@@ -18,12 +18,12 @@ package org.apache.lucene.index;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.io.Reader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.List;
-import java.io.Reader;
 import java.util.Map;
 import java.util.Objects;
 import java.util.concurrent.TimeUnit;
@@ -45,8 +45,8 @@ import org.apache.lucene.document.Column;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
-import org.apache.lucene.document.LongColumn;
 import org.apache.lucene.document.KnnFloatVectorField;
+import org.apache.lucene.document.LongColumn;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.StoredValue;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -739,8 +739,7 @@ final class IndexingChain implements Accountable {
       } else if (column instanceof BinaryColumn binaryCol) {
         processBinaryColumn(baseDocID, numDocs, binaryCol, pf, fieldType);
       } else {
-        throw new IllegalArgumentException(
-            "Unknown column type: " + column.getClass().getName());
+        throw new IllegalArgumentException("Unknown column type: " + column.getClass().getName());
       }
     }
   }
@@ -882,7 +881,8 @@ final class IndexingChain implements Accountable {
     public String stringValue() {
       if (tokenized && column instanceof BinaryColumn bc) {
         BytesRef ref = bc.binaryValue();
-        return new String(ref.bytes, ref.offset, ref.length, java.nio.charset.StandardCharsets.UTF_8);
+        return new String(
+            ref.bytes, ref.offset, ref.length, java.nio.charset.StandardCharsets.UTF_8);
       }
       return null;
     }
@@ -930,8 +930,8 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  private void validateColumnSchema(
-      String fieldName, PerField pf, IndexableFieldType fieldType) throws IOException {
+  private void validateColumnSchema(String fieldName, PerField pf, IndexableFieldType fieldType)
+      throws IOException {
     updateDocFieldSchema(fieldName, pf.schema, fieldType);
     if (pf.fieldInfo == null) {
       initializeFieldInfo(pf);
@@ -1013,15 +1013,12 @@ final class IndexingChain implements Accountable {
       }
       default ->
           throw new IllegalArgumentException(
-              "BinaryColumn \""
-                  + column.name()
-                  + "\" has incompatible docValuesType: "
-                  + dvType);
+              "BinaryColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
     }
   }
 
-  private void processPointsColumn(
-      int baseDocID, int numDocs, BinaryColumn column, PerField pf) throws IOException {
+  private void processPointsColumn(int baseDocID, int numDocs, BinaryColumn column, PerField pf)
+      throws IOException {
     PointValuesWriter writer = pf.pointValuesWriter;
     int batchDocID;
     while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
@@ -1070,10 +1067,7 @@ final class IndexingChain implements Accountable {
       }
       default ->
           throw new IllegalArgumentException(
-              "BinaryColumn \""
-                  + column.name()
-                  + "\" has incompatible docValuesType: "
-                  + dvType);
+              "BinaryColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
     }
   }
 

@@ -22,6 +22,7 @@ import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.BinaryColumn;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Column;
+import org.apache.lucene.document.Document;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongColumn;
@@ -29,7 +30,6 @@ import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.SortedSetDocValuesField;
-import org.apache.lucene.document.Document;
 import org.apache.lucene.document.StringField;
 import org.apache.lucene.document.TextField;
 import org.apache.lucene.search.DocIdSetIterator;
@@ -106,8 +106,7 @@ public class TestBatchIndexing extends LuceneTestCase {
     BytesRef[] values = {newBytesRef("aaa"), newBytesRef("bbb"), newBytesRef("ccc")};
     int[] docIds = {0, 1, 2};
     w.addBatch(
-        simpleBatch(
-            3, new ArrayBinaryColumn("binary", BinaryDocValuesField.TYPE, docIds, values)));
+        simpleBatch(3, new ArrayBinaryColumn("binary", BinaryDocValuesField.TYPE, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -130,8 +129,7 @@ public class TestBatchIndexing extends LuceneTestCase {
     BytesRef[] values = {newBytesRef("x"), newBytesRef("y"), newBytesRef("x")};
     int[] docIds = {0, 1, 2};
     w.addBatch(
-        simpleBatch(
-            3, new ArrayBinaryColumn("sorted", SortedDocValuesField.TYPE, docIds, values)));
+        simpleBatch(3, new ArrayBinaryColumn("sorted", SortedDocValuesField.TYPE, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -357,8 +355,7 @@ public class TestBatchIndexing extends LuceneTestCase {
 
     int[] docIds = {0, 1, 2};
     long[] values = {100, 200, 300};
-    w.addBatch(
-        simpleBatch(3, new ArrayLongColumn("val", storedNumericType, docIds, values)));
+    w.addBatch(simpleBatch(3, new ArrayLongColumn("val", storedNumericType, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -394,8 +391,7 @@ public class TestBatchIndexing extends LuceneTestCase {
 
     int[] docIds = {0, 1, 2};
     BytesRef[] values = {newBytesRef("aaa"), newBytesRef("bbb"), newBytesRef("ccc")};
-    w.addBatch(
-        simpleBatch(3, new ArrayBinaryColumn("val", storedSortedType, docIds, values)));
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("val", storedSortedType, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -430,8 +426,7 @@ public class TestBatchIndexing extends LuceneTestCase {
 
     int[] docIds = {0, 1, 2};
     long[] values = {10, 20, 30};
-    w.addBatch(
-        simpleBatch(3, new ArrayLongColumn("stored", storedOnlyType, docIds, values)));
+    w.addBatch(simpleBatch(3, new ArrayLongColumn("stored", storedOnlyType, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -463,8 +458,7 @@ public class TestBatchIndexing extends LuceneTestCase {
         simpleBatch(
             3,
             new ArrayLongColumn("stored_field", storedNumericType, allDocs, storedValues),
-            new ArrayLongColumn(
-                "dv_only", NumericDocValuesField.TYPE, allDocs, dvOnlyValues)));
+            new ArrayLongColumn("dv_only", NumericDocValuesField.TYPE, allDocs, dvOnlyValues)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -504,8 +498,7 @@ public class TestBatchIndexing extends LuceneTestCase {
 
     int[] docIds = {0, 1, 2};
     BytesRef[] values = {IntPoint.pack(10), IntPoint.pack(20), IntPoint.pack(30)};
-    w.addBatch(
-        simpleBatch(3, new ArrayBinaryColumn("pt", storedPointType, docIds, values)));
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("pt", storedPointType, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     LeafReader leaf = getOnlyLeafReader(r);
@@ -599,8 +592,7 @@ public class TestBatchIndexing extends LuceneTestCase {
 
     int[] docIds = {0, 1, 2};
     BytesRef[] values = {newBytesRef("aaa"), newBytesRef("bbb"), newBytesRef("ccc")};
-    w.addBatch(
-        simpleBatch(3, new ArrayBinaryColumn("field", invertedStoredType, docIds, values)));
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", invertedStoredType, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     IndexSearcher searcher = new IndexSearcher(r);
@@ -696,13 +688,10 @@ public class TestBatchIndexing extends LuceneTestCase {
     // TextField-like: tokenized, DOCS_AND_FREQS_AND_POSITIONS
     int[] docIds = {0, 1, 2};
     BytesRef[] values = {
-      newBytesRef("quick brown fox"),
-      newBytesRef("lazy brown dog"),
-      newBytesRef("quick fox jumps")
+      newBytesRef("quick brown fox"), newBytesRef("lazy brown dog"), newBytesRef("quick fox jumps")
     };
     w.addBatch(
-        simpleBatch(
-            3, new ArrayBinaryColumn("text", TextField.TYPE_NOT_STORED, docIds, values)));
+        simpleBatch(3, new ArrayBinaryColumn("text", TextField.TYPE_NOT_STORED, docIds, values)));
 
     DirectoryReader r = DirectoryReader.open(w);
     IndexSearcher searcher = new IndexSearcher(r);

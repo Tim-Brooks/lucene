@@ -1545,8 +1545,8 @@ public class IndexWriter
     return updateBatch(null, batch);
   }
 
-  private long updateBatch(
-      final DocumentsWriterDeleteQueue.Node<?> delNode, Batch batch) throws IOException {
+  private long updateBatch(final DocumentsWriterDeleteQueue.Node<?> delNode, Batch batch)
+      throws IOException {
     ensureOpen();
     boolean success = false;
     try {

@@ -464,8 +464,7 @@ final class DocumentsWriter implements Closeable, Accountable {
       // waits for all DWPT to be released:
       ensureOpen();
       try {
-        seqNo =
-            dwpt.updateBatch(batch, delNode, flushNotifications, numDocsInRAM::incrementAndGet);
+        seqNo = dwpt.updateBatch(batch, delNode, flushNotifications, numDocsInRAM::incrementAndGet);
       } finally {
         if (dwpt.isAborted()) {
           flushControl.doOnAbort(dwpt);
