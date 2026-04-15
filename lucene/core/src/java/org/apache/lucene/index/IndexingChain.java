@@ -964,6 +964,7 @@ final class IndexingChain implements Accountable {
           writer.addValue(baseDocID + batchDocID, column.longValue());
         }
       }
+      // $CASES-OMITTED$
       default ->
           throw new IllegalArgumentException(
               "LongColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
@@ -996,6 +997,7 @@ final class IndexingChain implements Accountable {
         }
         consumed = docID - baseDocID;
       }
+      // $CASES-OMITTED$
       default ->
           throw new IllegalArgumentException(
               "DenseLongColumn \""
@@ -1061,6 +1063,7 @@ final class IndexingChain implements Accountable {
         }
         consumed = docID - baseDocID;
       }
+      // $CASES-OMITTED$
       default ->
           throw new IllegalArgumentException(
               "DenseBinaryColumn \""
@@ -1116,6 +1119,7 @@ final class IndexingChain implements Accountable {
           writer.addValue(baseDocID + batchDocID, column.binaryValue());
         }
       }
+      // $CASES-OMITTED$
       default ->
           throw new IllegalArgumentException(
               "BinaryColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
@@ -1170,6 +1174,7 @@ final class IndexingChain implements Accountable {
           pointWriter.addPackedValue(segDocID, value);
         }
       }
+      // $CASES-OMITTED$
       default ->
           throw new IllegalArgumentException(
               "BinaryColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
