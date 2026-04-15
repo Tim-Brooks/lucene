@@ -960,7 +960,8 @@ public class TestBatchIndexing extends LuceneTestCase {
     // Verify stored fields
     StoredFields storedFields = leaf.storedFields();
     for (int i = 0; i < 3; i++) {
-      assertEquals(storedValues[i], storedFields.document(i).getField("data").numericValue().longValue());
+      assertEquals(
+          storedValues[i], storedFields.document(i).getField("data").numericValue().longValue());
     }
 
     // Verify inverted index
