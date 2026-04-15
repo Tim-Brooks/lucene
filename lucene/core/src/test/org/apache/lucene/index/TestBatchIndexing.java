@@ -738,6 +738,283 @@ public class TestBatchIndexing extends LuceneTestCase {
     dir.close();
   }
 
+  /**
+   * Tests that a DOCS+omitNorms field with SORTED_SET doc values is processed entirely in the
+   * column path — both terms and doc values — when the field is not stored.
+   */
+  public void testInvertedWithSortedSetDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType type = new FieldType();
+    type.setIndexOptions(IndexOptions.DOCS);
+    type.setOmitNorms(true);
+    type.setTokenized(false);
+    type.setDocValuesType(DocValuesType.SORTED_SET);
+    type.freeze();
+
+    // Doc 0 has two values, doc 1 has one
+    int[] docIds = {0, 0, 1};
+    BytesRef[] values = {newBytesRef("a"), newBytesRef("b"), newBytesRef("a")};
+    w.addBatch(simpleBatch(2, new ArrayBinaryColumn("field", type, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index
+    assertEquals(2, searcher.count(new TermQuery(new Term("field", "a"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "b"))));
+
+    // Verify sorted set doc values
+    SortedSetDocValues dv = leaf.getSortedSetDocValues("field");
+    assertEquals(0, dv.nextDoc());
+    assertEquals(2, dv.docValueCount());
+    assertEquals(newBytesRef("a"), dv.lookupOrd(dv.nextOrd()));
+    assertEquals(newBytesRef("b"), dv.lookupOrd(dv.nextOrd()));
+
+    assertEquals(1, dv.nextDoc());
+    assertEquals(1, dv.docValueCount());
+    assertEquals(newBytesRef("a"), dv.lookupOrd(dv.nextOrd()));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests that a DOCS+omitNorms field with points is processed in the column path for both terms
+   * and points.
+   */
+  public void testInvertedWithPoints() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType type = new FieldType();
+    type.setIndexOptions(IndexOptions.DOCS);
+    type.setOmitNorms(true);
+    type.setTokenized(false);
+    type.setDimensions(1, Integer.BYTES);
+    type.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {IntPoint.pack(10), IntPoint.pack(20), IntPoint.pack(30)};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", type, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index — each packed point value is a term
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", IntPoint.pack(10)))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", IntPoint.pack(20)))));
+    assertEquals(0, searcher.count(new TermQuery(new Term("field", IntPoint.pack(99)))));
+
+    // Verify points
+    assertEquals(3, searcher.count(IntPoint.newRangeQuery("field", 10, 30)));
+    assertEquals(1, searcher.count(IntPoint.newExactQuery("field", 10)));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests that a field with DOCS_AND_FREQS (not DOCS-only) still goes through the row path, even
+   * with omitNorms. This verifies the dispatch boundary.
+   */
+  public void testDocsAndFreqsStillUsesRowPath() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType type = new FieldType();
+    type.setIndexOptions(IndexOptions.DOCS_AND_FREQS);
+    type.setOmitNorms(true);
+    type.setTokenized(false);
+    type.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("alpha"), newBytesRef("beta"), newBytesRef("alpha")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("tag", type, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    assertEquals(2, searcher.count(new TermQuery(new Term("tag", "alpha"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("tag", "beta"))));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests that a field with DOCS but without omitNorms goes through the row path (norms require
+   * per-doc finish).
+   */
+  public void testDocsWithNormsStillUsesRowPath() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType type = new FieldType();
+    type.setIndexOptions(IndexOptions.DOCS);
+    type.setOmitNorms(false); // needs norms → row path
+    type.setTokenized(false);
+    type.freeze();
+
+    int[] docIds = {0, 1};
+    BytesRef[] values = {newBytesRef("foo"), newBytesRef("bar")};
+    w.addBatch(simpleBatch(2, new ArrayBinaryColumn("field", type, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    IndexSearcher searcher = new IndexSearcher(r);
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "foo"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "bar"))));
+
+    // Verify norms exist
+    LeafReader leaf = getOnlyLeafReader(r);
+    NumericDocValues norms = leaf.getNormValues("field");
+    assertNotNull(norms);
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests mixing a column-path indexed field (DOCS+omitNorms) with a pure doc values column in the
+   * same batch.
+   */
+  public void testInvertedColumnWithDvOnlyColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType stringType = new FieldType();
+    stringType.setIndexOptions(IndexOptions.DOCS);
+    stringType.setOmitNorms(true);
+    stringType.setTokenized(false);
+    stringType.freeze();
+
+    int[] allDocs = {0, 1, 2};
+    BytesRef[] terms = {newBytesRef("x"), newBytesRef("y"), newBytesRef("x")};
+    long[] dvValues = {100, 200, 300};
+
+    w.addBatch(
+        simpleBatch(
+            3,
+            new ArrayBinaryColumn("tag", stringType, allDocs, terms),
+            new ArrayLongColumn("score", NumericDocValuesField.TYPE, allDocs, dvValues)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index
+    assertEquals(2, searcher.count(new TermQuery(new Term("tag", "x"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("tag", "y"))));
+
+    // Verify doc values
+    NumericDocValues dv = leaf.getNumericDocValues("score");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(dvValues[i], dv.longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests a stored field combined with a DOCS+omitNorms indexed column in the same batch. The
+   * stored column goes through the row path; the indexed column goes through the column path.
+   */
+  public void testStoredColumnWithInvertedColumn() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // Stored-only field
+    FieldType storedType = new FieldType();
+    storedType.setStored(true);
+    storedType.freeze();
+
+    // DOCS+omitNorms indexed field (column path)
+    FieldType indexedType = new FieldType();
+    indexedType.setIndexOptions(IndexOptions.DOCS);
+    indexedType.setOmitNorms(true);
+    indexedType.setTokenized(false);
+    indexedType.freeze();
+
+    int[] allDocs = {0, 1, 2};
+    long[] storedValues = {10, 20, 30};
+    BytesRef[] indexedValues = {newBytesRef("a"), newBytesRef("b"), newBytesRef("a")};
+
+    w.addBatch(
+        simpleBatch(
+            3,
+            new ArrayLongColumn("data", storedType, allDocs, storedValues),
+            new ArrayBinaryColumn("tag", indexedType, allDocs, indexedValues)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      assertEquals(storedValues[i], storedFields.document(i).getField("data").numericValue().longValue());
+    }
+
+    // Verify inverted index
+    assertEquals(2, searcher.count(new TermQuery(new Term("tag", "a"))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("tag", "b"))));
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  /**
+   * Tests that a DOCS+omitNorms+stored field still goes through the row path (stored forces row).
+   * The terms and DV are processed alongside stored in the row pass since the cursor is single-use.
+   */
+  public void testInvertedStoredForcesRowPath() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    FieldType type = new FieldType();
+    type.setIndexOptions(IndexOptions.DOCS);
+    type.setOmitNorms(true);
+    type.setTokenized(false);
+    type.setStored(true);
+    type.setDocValuesType(DocValuesType.SORTED);
+    type.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {newBytesRef("x"), newBytesRef("y"), newBytesRef("z")};
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", type, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify all three features work
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", "x"))));
+
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      assertEquals(values[i], storedFields.document(i).getField("field").binaryValue());
+    }
+
+    SortedDocValues dv = leaf.getSortedDocValues("field");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.lookupOrd(dv.ordValue()));
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
   public void testColumnWithNoneDocValuesTypeAndNoPointsThrows() throws IOException {
     Directory dir = newDirectory();
     IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());

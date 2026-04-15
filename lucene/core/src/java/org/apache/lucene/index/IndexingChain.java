@@ -42,6 +42,7 @@ import org.apache.lucene.codecs.PointsWriter;
 import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.BinaryColumn;
 import org.apache.lucene.document.Column;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
@@ -698,7 +699,7 @@ final class IndexingChain implements Accountable {
                 + " or have index options");
       }
 
-      if (fieldType.stored() || fieldType.indexOptions() != IndexOptions.NONE) {
+      if (needsRowProcessing(fieldType)) {
         hasRowColumns = true;
       }
 
@@ -729,12 +730,20 @@ final class IndexingChain implements Accountable {
     // Column-oriented pass: index columns that don't need per-document lifecycle
     for (Column column : batch.columns()) {
       final IndexableFieldType fieldType = column.fieldType();
-      if (fieldType.stored() || fieldType.indexOptions() != IndexOptions.NONE) {
+      if (needsRowProcessing(fieldType)) {
         continue; // already consumed in the row pass
       }
       PerField pf = getOrAddPerField(column.name());
 
-      if (column instanceof LongColumn longCol) {
+      if (fieldType.indexOptions() == IndexOptions.DOCS && fieldType.omitNorms()) {
+        // Column-oriented term indexing for DOCS+omitNorms fields
+        if (column instanceof BinaryColumn binaryCol) {
+          processTermsColumn(baseDocID, numDocs, binaryCol, pf, fieldType);
+        } else {
+          throw new IllegalArgumentException(
+              "Indexed column \"" + column.name() + "\" must be a BinaryColumn");
+        }
+      } else if (column instanceof LongColumn longCol) {
         processLongColumn(baseDocID, numDocs, longCol, pf, fieldType.docValuesType());
       } else if (column instanceof BinaryColumn binaryCol) {
         processBinaryColumn(baseDocID, numDocs, binaryCol, pf, fieldType);
@@ -760,7 +769,7 @@ final class IndexingChain implements Accountable {
 
     for (Column column : columns) {
       IndexableFieldType fieldType = column.fieldType();
-      if (fieldType.stored() == false && fieldType.indexOptions() == IndexOptions.NONE) {
+      if (needsRowProcessing(fieldType) == false) {
         continue;
       }
       if (numRowCols >= adapters.length) {
@@ -1081,6 +1090,97 @@ final class IndexingChain implements Accountable {
               + " which is out of range [0, "
               + numDocs
               + ")");
+    }
+  }
+
+  /**
+   * Returns true if a column with the given field type must be processed in the row-oriented pass.
+   * A column needs the row path if it is stored, or if it has index options that require token
+   * streams, frequencies, positions, or norms. Fields with {@link IndexOptions#DOCS} and omitNorms
+   * can be processed in the column-oriented pass since they only need the term → docID mapping.
+   */
+  private static boolean needsRowProcessing(IndexableFieldType fieldType) {
+    if (fieldType.stored()) {
+      return true;
+    }
+    IndexOptions indexOptions = fieldType.indexOptions();
+    if (indexOptions == IndexOptions.NONE) {
+      return false;
+    }
+    // DOCS with omitNorms can be processed as a column — just a term → docID mapping
+    return indexOptions != IndexOptions.DOCS || fieldType.omitNorms() == false;
+  }
+
+  /**
+   * Processes a BinaryColumn that has indexed terms with {@link IndexOptions#DOCS} and omitNorms in
+   * the column-oriented pass. This also handles any doc values and/or points on the same field.
+   */
+  private void processTermsColumn(
+      int baseDocID, int numDocs, BinaryColumn column, PerField pf, IndexableFieldType fieldType)
+      throws IOException {
+    final DocValuesType dvType = fieldType.docValuesType();
+    final boolean hasPoints = fieldType.pointDimensionCount() != 0;
+
+    // Reusable adapter for pf.invert() — avoids per-value allocation
+    SingleTermField termField = new SingleTermField(column.name(), fieldType);
+
+    int batchDocID;
+    int lastBatchDocID = -1;
+    while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+      checkDocID(column, batchDocID, numDocs);
+      int segDocID = baseDocID + batchDocID;
+      BytesRef value = column.binaryValue();
+      termField.setValue(value);
+
+      if (batchDocID != lastBatchDocID) {
+        // Finish previous document if there was one
+        if (lastBatchDocID >= 0) {
+          pf.finish(baseDocID + lastBatchDocID);
+          termsHash.finishDocument(baseDocID + lastBatchDocID);
+        }
+        // Start new document
+        termsHash.startDocument();
+        pf.reset(segDocID, fieldType);
+        pf.invert(segDocID, termField, true);
+        lastBatchDocID = batchDocID;
+      } else {
+        // Same doc, additional value (multi-valued)
+        pf.invert(segDocID, termField, false);
+      }
+
+      // Also write doc values and points for this value
+      if (dvType != DocValuesType.NONE) {
+        indexDocValue(segDocID, pf, dvType, termField);
+      }
+      if (hasPoints) {
+        pf.pointValuesWriter.addPackedValue(segDocID, value);
+      }
+    }
+    // Finish the last document
+    if (lastBatchDocID >= 0) {
+      pf.finish(baseDocID + lastBatchDocID);
+      termsHash.finishDocument(baseDocID + lastBatchDocID);
+    }
+  }
+
+  /**
+   * Reusable Field subclass for passing a single binary term value to {@link PerField#invert} and
+   * {@link #indexDocValue}. Extends {@link Field} so that {@code name()} and {@code fieldType()}
+   * resolve to final field reads rather than virtual dispatch.
+   */
+  private static class SingleTermField extends Field {
+
+    SingleTermField(String name, IndexableFieldType fieldType) {
+      super(name, fieldType);
+    }
+
+    void setValue(BytesRef value) {
+      this.fieldsData = value;
+    }
+
+    @Override
+    public InvertableType invertableType() {
+      return InvertableType.BINARY;
     }
   }
 
