@@ -1195,13 +1195,12 @@ public class TestBatchIndexing extends LuceneTestCase {
   }
 
   private static class ArrayDenseLongColumn extends DenseLongColumn {
-    private final long[] values;
+
     private final LongsRef ref;
     private boolean exhausted;
 
     ArrayDenseLongColumn(String name, IndexableFieldType fieldType, long[] values) {
       super(name, fieldType);
-      this.values = values;
       this.ref = new LongsRef(values, 0, values.length);
       this.exhausted = false;
     }
@@ -1220,14 +1219,12 @@ public class TestBatchIndexing extends LuceneTestCase {
   }
 
   private static class ArrayDenseBinaryColumn extends DenseBinaryColumn {
-    private final byte[] bytes;
     private final BytesRef ref;
     private boolean exhausted;
 
     ArrayDenseBinaryColumn(
         String name, IndexableFieldType fieldType, ByteOrder byteOrder, byte[] bytes) {
       super(name, fieldType, byteOrder);
-      this.bytes = bytes;
       this.ref = new BytesRef(bytes, 0, bytes.length);
       this.exhausted = false;
     }
