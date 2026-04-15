@@ -35,7 +35,7 @@ import org.apache.lucene.util.BytesRef;
  *
  * @lucene.experimental
  */
-public abstract class BinaryColumn extends Column {
+public abstract class BinaryColumn extends SparseColumn {
 
   /** Creates a BinaryColumn with the given field name and type. */
   protected BinaryColumn(String name, IndexableFieldType fieldType) {

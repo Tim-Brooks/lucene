@@ -19,12 +19,15 @@ package org.apache.lucene.index;
 import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 
 import java.io.IOException;
+import java.nio.ByteOrder;
 import org.apache.lucene.codecs.DocValuesConsumer;
 import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.BytesRef;
 import org.apache.lucene.util.Counter;
 import org.apache.lucene.util.FixedBitSet;
+import org.apache.lucene.util.LongsRef;
 import org.apache.lucene.util.packed.PackedInts;
 import org.apache.lucene.util.packed.PackedLongValues;
 
@@ -62,6 +65,34 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     updateBytesUsed();
 
     lastDocID = docID;
+  }
+
+  public void addDenseValues(int firstDocID, LongsRef values) {
+    assert firstDocID > lastDocID;
+
+    pending.add(values.longs, values.offset, values.length);
+    docsWithField.addRange(firstDocID, firstDocID + values.length);
+
+    updateBytesUsed();
+
+    lastDocID = firstDocID + values.length - 1;
+  }
+
+  public void addDenseValues(int firstDocID, ByteOrder byteOrder, BytesRef values) {
+    if ((values.length & 7) != 0) {
+      throw new IllegalArgumentException(
+          "BytesRef length must be a multiple of Long.BYTES: length=" + values.length);
+    }
+    assert firstDocID > lastDocID;
+
+    int numValues = values.length >> 3;
+
+    pending.add(byteOrder, values.bytes, values.offset, values.length);
+    docsWithField.addRange(firstDocID, firstDocID + numValues);
+
+    updateBytesUsed();
+
+    lastDocID = firstDocID + numValues - 1;
   }
 
   private void updateBytesUsed() {

@@ -33,7 +33,7 @@ import org.apache.lucene.index.IndexableFieldType;
  *
  * @lucene.experimental
  */
-public abstract class LongColumn extends Column {
+public abstract class LongColumn extends SparseColumn {
 
   /** Creates a LongColumn with the given field name and type. */
   protected LongColumn(String name, IndexableFieldType fieldType) {

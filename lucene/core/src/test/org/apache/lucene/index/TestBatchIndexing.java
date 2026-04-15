@@ -17,11 +17,14 @@
 package org.apache.lucene.index;
 
 import java.io.IOException;
+import java.nio.ByteOrder;
 import java.util.List;
 import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.BinaryColumn;
 import org.apache.lucene.document.BinaryDocValuesField;
 import org.apache.lucene.document.Column;
+import org.apache.lucene.document.DenseBinaryColumn;
+import org.apache.lucene.document.DenseLongColumn;
 import org.apache.lucene.document.Document;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.IntPoint;
@@ -39,6 +42,7 @@ import org.apache.lucene.store.Directory;
 import org.apache.lucene.tests.analysis.MockAnalyzer;
 import org.apache.lucene.tests.util.LuceneTestCase;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.LongsRef;
 
 /** Tests for column-oriented batch indexing via {@link IndexWriter#addBatch}. */
 public class TestBatchIndexing extends LuceneTestCase {
@@ -773,6 +777,349 @@ public class TestBatchIndexing extends LuceneTestCase {
     dir.close();
   }
 
+  public void testStoredIndexedWithDocValuesAndPoints() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored + indexed(DOCS, omitNorms) + SORTED DV + 4-byte points
+    FieldType allType = new FieldType();
+    allType.setStored(true);
+    allType.setIndexOptions(IndexOptions.DOCS);
+    allType.setOmitNorms(true);
+    allType.setTokenized(false);
+    allType.setDocValuesType(DocValuesType.SORTED);
+    allType.setDimensions(1, Integer.BYTES);
+    allType.freeze();
+
+    int[] docIds = {0, 1, 2};
+    BytesRef[] values = {
+      newBytesRef(IntPoint.pack(10)), newBytesRef(IntPoint.pack(20)), newBytesRef(IntPoint.pack(30))
+    };
+    w.addBatch(simpleBatch(3, new ArrayBinaryColumn("field", allType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    IndexSearcher searcher = new IndexSearcher(r);
+
+    // Verify inverted index (terms)
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", values[0]))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", values[1]))));
+    assertEquals(1, searcher.count(new TermQuery(new Term("field", values[2]))));
+
+    // Verify stored fields
+    StoredFields storedFields = leaf.storedFields();
+    for (int i = 0; i < 3; i++) {
+      assertEquals(values[i], storedFields.document(i).getField("field").binaryValue());
+    }
+
+    // Verify doc values
+    SortedDocValues dv = leaf.getSortedDocValues("field");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.lookupOrd(dv.ordValue()));
+    }
+
+    // Verify points
+    assertEquals(3, leaf.getPointValues("field").size());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testMultiValuedStoredWithDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // stored + SORTED_NUMERIC doc values (multi-valued)
+    FieldType storedSortedNumericType = new FieldType();
+    storedSortedNumericType.setStored(true);
+    storedSortedNumericType.setDocValuesType(DocValuesType.SORTED_NUMERIC);
+    storedSortedNumericType.freeze();
+
+    // Doc 0 has two values (10, 20), doc 1 has one value (30)
+    int[] docIds = {0, 0, 1};
+    long[] values = {10, 20, 30};
+    w.addBatch(simpleBatch(2, new ArrayLongColumn("val", storedSortedNumericType, docIds, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    // Verify stored fields — each value occurrence is stored separately
+    StoredFields storedFields = leaf.storedFields();
+    Document doc0 = storedFields.document(0);
+    assertEquals(2, doc0.getFields("val").length);
+    assertEquals(10L, doc0.getFields("val")[0].numericValue().longValue());
+    assertEquals(20L, doc0.getFields("val")[1].numericValue().longValue());
+    Document doc1 = storedFields.document(1);
+    assertEquals(1, doc1.getFields("val").length);
+    assertEquals(30L, doc1.getFields("val")[0].numericValue().longValue());
+
+    // Verify doc values
+    SortedNumericDocValues dv = leaf.getSortedNumericDocValues("val");
+    assertEquals(0, dv.nextDoc());
+    assertEquals(2, dv.docValueCount());
+    assertEquals(10, dv.nextValue());
+    assertEquals(20, dv.nextValue());
+    assertEquals(1, dv.nextDoc());
+    assertEquals(1, dv.docValueCount());
+    assertEquals(30, dv.nextValue());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseNumericDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    long[] values = {100, 200, 300};
+    w.addBatch(simpleBatch(3, new ArrayDenseLongColumn("val", NumericDocValuesField.TYPE, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    NumericDocValues dv = leaf.getNumericDocValues("val");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseSortedNumericDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    long[] values = {10, 20, 30, 40, 50};
+    w.addBatch(
+        simpleBatch(5, new ArrayDenseLongColumn("val", SortedNumericDocValuesField.TYPE, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    SortedNumericDocValues dv = leaf.getSortedNumericDocValues("val");
+    for (int i = 0; i < 5; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(1, dv.docValueCount());
+      assertEquals(values[i], dv.nextValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseColumnCountMismatchThrows() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // 2 values but batch expects 3 documents
+    long[] values = {10, 20};
+    expectThrows(
+        IllegalArgumentException.class,
+        () ->
+            w.addBatch(
+                simpleBatch(
+                    3, new ArrayDenseLongColumn("val", NumericDocValuesField.TYPE, values))));
+
+    // Writer should still be usable after the failure — use a different field to avoid
+    // the partially-written DV entries from the failed batch
+    w.addBatch(
+        simpleBatch(
+            1, new ArrayDenseLongColumn("val2", NumericDocValuesField.TYPE, new long[] {42})));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    NumericDocValues dv = leaf.getNumericDocValues("val2");
+    assertNotNull(dv);
+    int doc = dv.nextDoc();
+    assertTrue(doc != DocIdSetIterator.NO_MORE_DOCS);
+    assertEquals(42, dv.longValue());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseColumnTooManyValuesThrows() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // 5 values but batch only has 3 documents
+    long[] values = {10, 20, 30, 40, 50};
+    expectThrows(
+        IllegalArgumentException.class,
+        () ->
+            w.addBatch(
+                simpleBatch(
+                    3, new ArrayDenseLongColumn("val", NumericDocValuesField.TYPE, values))));
+
+    // Writer should still be usable — no values were written past numDocs
+    w.addBatch(
+        simpleBatch(
+            1, new ArrayDenseLongColumn("val2", NumericDocValuesField.TYPE, new long[] {42})));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    NumericDocValues dv = leaf.getNumericDocValues("val2");
+    assertNotNull(dv);
+    int doc = dv.nextDoc();
+    assertTrue(doc != DocIdSetIterator.NO_MORE_DOCS);
+    assertEquals(42, dv.longValue());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseBinaryNumericDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    long[] values = {100, 200, 300};
+    byte[] bytes = longsToBytes(values, ByteOrder.LITTLE_ENDIAN);
+    w.addBatch(
+        simpleBatch(
+            3,
+            new ArrayDenseBinaryColumn(
+                "val", NumericDocValuesField.TYPE, ByteOrder.LITTLE_ENDIAN, bytes)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    NumericDocValues dv = leaf.getNumericDocValues("val");
+    for (int i = 0; i < 3; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.longValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseBinarySortedNumericDocValues() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    long[] values = {10, 20, 30, 40, 50};
+    byte[] bytes = longsToBytes(values, ByteOrder.BIG_ENDIAN);
+    w.addBatch(
+        simpleBatch(
+            5,
+            new ArrayDenseBinaryColumn(
+                "val", SortedNumericDocValuesField.TYPE, ByteOrder.BIG_ENDIAN, bytes)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+
+    SortedNumericDocValues dv = leaf.getSortedNumericDocValues("val");
+    for (int i = 0; i < 5; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(1, dv.docValueCount());
+      assertEquals(values[i], dv.nextValue());
+    }
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseBinaryColumnTooManyValuesThrows() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // 5 values but batch only has 3 documents
+    long[] values = {10, 20, 30, 40, 50};
+    byte[] bytes = longsToBytes(values, ByteOrder.LITTLE_ENDIAN);
+    expectThrows(
+        IllegalArgumentException.class,
+        () ->
+            w.addBatch(
+                simpleBatch(
+                    3,
+                    new ArrayDenseBinaryColumn(
+                        "val", NumericDocValuesField.TYPE, ByteOrder.LITTLE_ENDIAN, bytes))));
+
+    // Writer should still be usable
+    w.addBatch(
+        simpleBatch(
+            1,
+            new ArrayDenseBinaryColumn(
+                "val2",
+                NumericDocValuesField.TYPE,
+                ByteOrder.LITTLE_ENDIAN,
+                longsToBytes(new long[] {42}, ByteOrder.LITTLE_ENDIAN))));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    NumericDocValues dv = leaf.getNumericDocValues("val2");
+    assertNotNull(dv);
+    int doc = dv.nextDoc();
+    assertTrue(doc != DocIdSetIterator.NO_MORE_DOCS);
+    assertEquals(42, dv.longValue());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseBinaryColumnCountMismatchThrows() throws IOException {
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    // 2 values but batch expects 3 documents
+    long[] values = {10, 20};
+    byte[] bytes = longsToBytes(values, ByteOrder.LITTLE_ENDIAN);
+    expectThrows(
+        IllegalArgumentException.class,
+        () ->
+            w.addBatch(
+                simpleBatch(
+                    3,
+                    new ArrayDenseBinaryColumn(
+                        "val", NumericDocValuesField.TYPE, ByteOrder.LITTLE_ENDIAN, bytes))));
+
+    // Writer should still be usable
+    w.addBatch(
+        simpleBatch(
+            1,
+            new ArrayDenseBinaryColumn(
+                "val2",
+                NumericDocValuesField.TYPE,
+                ByteOrder.LITTLE_ENDIAN,
+                longsToBytes(new long[] {42}, ByteOrder.LITTLE_ENDIAN))));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    NumericDocValues dv = leaf.getNumericDocValues("val2");
+    assertNotNull(dv);
+    int doc = dv.nextDoc();
+    assertTrue(doc != DocIdSetIterator.NO_MORE_DOCS);
+    assertEquals(42, dv.longValue());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  private static byte[] longsToBytes(long[] values, ByteOrder byteOrder) {
+    byte[] bytes = new byte[values.length * Long.BYTES];
+    java.lang.invoke.VarHandle vh =
+        byteOrder == ByteOrder.LITTLE_ENDIAN
+            ? org.apache.lucene.util.BitUtil.VH_LE_LONG
+            : org.apache.lucene.util.BitUtil.VH_BE_LONG;
+    for (int i = 0; i < values.length; i++) {
+      vh.set(bytes, i * Long.BYTES, values[i]);
+    }
+    return bytes;
+  }
+
   // --- Test Column implementations backed by arrays ---
 
   private static Batch simpleBatch(int numDocs, Column... columns) {
@@ -811,6 +1158,11 @@ public class TestBatchIndexing extends LuceneTestCase {
     public long longValue() {
       return values[pos];
     }
+
+    @Override
+    public void reset() {
+      pos = -1;
+    }
   }
 
   private static class ArrayBinaryColumn extends BinaryColumn {
@@ -834,6 +1186,62 @@ public class TestBatchIndexing extends LuceneTestCase {
     @Override
     public BytesRef binaryValue() {
       return values[pos];
+    }
+
+    @Override
+    public void reset() {
+      pos = -1;
+    }
+  }
+
+  private static class ArrayDenseLongColumn extends DenseLongColumn {
+    private final long[] values;
+    private final LongsRef ref;
+    private boolean exhausted;
+
+    ArrayDenseLongColumn(String name, IndexableFieldType fieldType, long[] values) {
+      super(name, fieldType);
+      this.values = values;
+      this.ref = new LongsRef(values, 0, values.length);
+      this.exhausted = false;
+    }
+
+    @Override
+    public LongsRef nextLongs() {
+      if (exhausted) return null;
+      exhausted = true;
+      return ref;
+    }
+
+    @Override
+    public void reset() {
+      exhausted = false;
+    }
+  }
+
+  private static class ArrayDenseBinaryColumn extends DenseBinaryColumn {
+    private final byte[] bytes;
+    private final BytesRef ref;
+    private boolean exhausted;
+
+    ArrayDenseBinaryColumn(
+        String name, IndexableFieldType fieldType, ByteOrder byteOrder, byte[] bytes) {
+      super(name, fieldType, byteOrder);
+      this.bytes = bytes;
+      this.ref = new BytesRef(bytes, 0, bytes.length);
+      this.exhausted = false;
+    }
+
+    @Override
+    public BytesRef nextBytes() {
+      if (exhausted) return null;
+      exhausted = true;
+      return ref;
+    }
+
+    @Override
+    public void reset() {
+      exhausted = false;
     }
   }
 }

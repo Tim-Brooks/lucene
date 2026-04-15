@@ -20,19 +20,16 @@ import java.util.Objects;
 import org.apache.lucene.index.IndexableFieldType;
 
 /**
- * A single field's values across multiple documents in a {@link Batch}. Each Column has a name, a
- * field type, and provides a cursor over (doc-id, value) pairs. Doc-ids are batch-local (0 to
- * numDocs-1) and must be returned in non-decreasing order.
+ * A single field's values across multiple documents in a {@link Batch}. Each Column has a name and
+ * a field type.
  *
- * <p>Subclasses specialize the value type: {@link LongColumn} for numeric values and {@link
- * BinaryColumn} for binary/bytes values.
+ * <p>Subclasses provide different iteration models: {@link SparseColumn} for sparse doc-id
+ * iteration (where not every document has a value), and {@link DenseLongColumn} for dense bulk
+ * access (where every document has a value).
  *
  * @lucene.experimental
  */
 public abstract class Column {
-
-  /** Sentinel value returned by {@code nextDoc()} when there are no more documents. */
-  public static final int NO_MORE_DOCS = Integer.MAX_VALUE;
 
   private final String name;
   private final IndexableFieldType fieldType;
@@ -59,10 +56,8 @@ public abstract class Column {
   }
 
   /**
-   * Advances to the next doc-id that has a value and returns it, or {@link #NO_MORE_DOCS} if there
-   * are no more values. Doc-ids are batch-local (0 to numDocs-1).
-   *
-   * @return the next batch-local doc-id, or {@link #NO_MORE_DOCS}
+   * Resets the cursor to its initial state, allowing the column to be iterated again from the
+   * beginning.
    */
-  public abstract int nextDoc();
+  public abstract void reset();
 }

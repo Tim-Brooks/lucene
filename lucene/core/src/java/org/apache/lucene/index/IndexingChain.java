@@ -18,7 +18,6 @@ package org.apache.lucene.index;
 
 import java.io.Closeable;
 import java.io.IOException;
-import java.io.Reader;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
@@ -42,12 +41,16 @@ import org.apache.lucene.codecs.PointsWriter;
 import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.BinaryColumn;
 import org.apache.lucene.document.Column;
+import org.apache.lucene.document.DenseBinaryColumn;
+import org.apache.lucene.document.DenseLongColumn;
+import org.apache.lucene.document.Field;
 import org.apache.lucene.document.FieldType;
 import org.apache.lucene.document.InvertableType;
 import org.apache.lucene.document.KnnByteVectorField;
 import org.apache.lucene.document.KnnFloatVectorField;
 import org.apache.lucene.document.LongColumn;
 import org.apache.lucene.document.NumericDocValuesField;
+import org.apache.lucene.document.SparseColumn;
 import org.apache.lucene.document.StoredValue;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.search.Sort;
@@ -65,6 +68,7 @@ import org.apache.lucene.util.Counter;
 import org.apache.lucene.util.IOUtils;
 import org.apache.lucene.util.InfoStream;
 import org.apache.lucene.util.IntBlockPool;
+import org.apache.lucene.util.LongsRef;
 import org.apache.lucene.util.RamUsageEstimator;
 import org.apache.lucene.util.Version;
 
@@ -720,21 +724,33 @@ final class IndexingChain implements Accountable {
       }
     }
 
-    // Row-oriented pass: process columns that need per-document lifecycle (stored or inverted),
-    // also writing their doc values and points in the same pass (cursors are single-use).
+    // Row-oriented pass: stored fields and term inversion only
     if (hasRowColumns) {
       processRowColumns(baseDocID, numDocs, batch.columns());
     }
 
-    // Column-oriented pass: index columns that don't need per-document lifecycle
+    // Reset cursors that were consumed in the row pass so they can be re-iterated
+    // in the column pass for doc values and points processing.
     for (Column column : batch.columns()) {
       final IndexableFieldType fieldType = column.fieldType();
       if (fieldType.stored() || fieldType.indexOptions() != IndexOptions.NONE) {
-        continue; // already consumed in the row pass
+        column.reset();
+      }
+    }
+
+    // Column-oriented pass: doc values and points for all columns that have them
+    for (Column column : batch.columns()) {
+      final IndexableFieldType fieldType = column.fieldType();
+      if (fieldType.docValuesType() == DocValuesType.NONE && fieldType.pointDimensionCount() == 0) {
+        continue; // no column-oriented features
       }
       PerField pf = getOrAddPerField(column.name());
 
-      if (column instanceof LongColumn longCol) {
+      if (column instanceof DenseLongColumn denseCol) {
+        processDenseLongColumn(baseDocID, numDocs, denseCol, pf, fieldType.docValuesType());
+      } else if (column instanceof DenseBinaryColumn denseCol) {
+        processDenseBinaryColumn(baseDocID, numDocs, denseCol, pf, fieldType.docValuesType());
+      } else if (column instanceof LongColumn longCol) {
         processLongColumn(baseDocID, numDocs, longCol, pf, fieldType.docValuesType());
       } else if (column instanceof BinaryColumn binaryCol) {
         processBinaryColumn(baseDocID, numDocs, binaryCol, pf, fieldType);
@@ -745,9 +761,9 @@ final class IndexingChain implements Accountable {
   }
 
   /**
-   * Processes columns that need per-document lifecycle (stored or inverted) in a doc-by-doc merged
-   * iteration. Uses {@link #processField} for each entry, so all field features (inverted, stored,
-   * doc values, points) are handled by the same code path as {@link #processDocument}.
+   * Processes row-oriented features (stored fields and term inversion) for columns that have stored
+   * or indexed fields, in a doc-by-doc merged iteration. Doc values and points are handled
+   * separately in the column-oriented pass.
    */
   private void processRowColumns(int baseDocID, int numDocs, Iterable<Column> columns)
       throws IOException {
@@ -763,14 +779,15 @@ final class IndexingChain implements Accountable {
       if (fieldType.stored() == false && fieldType.indexOptions() == IndexOptions.NONE) {
         continue;
       }
+      SparseColumn sparse = (SparseColumn) column;
       if (numRowCols >= adapters.length) {
         adapters = ArrayUtil.grow(adapters, numRowCols + 1);
         rowPfs = ArrayUtil.grow(rowPfs, numRowCols + 1);
         nextDocs = ArrayUtil.grow(nextDocs, numRowCols + 1);
       }
-      adapters[numRowCols] = new ColumnFieldAdapter(column);
+      adapters[numRowCols] = new ColumnFieldAdapter(sparse);
       rowPfs[numRowCols] = getOrAddPerField(column.name());
-      nextDocs[numRowCols] = column.nextDoc();
+      nextDocs[numRowCols] = sparse.nextDoc();
       if (fieldType.indexOptions() != IndexOptions.NONE) {
         hasInverted = true;
       }
@@ -782,13 +799,13 @@ final class IndexingChain implements Accountable {
     long fieldGen = nextFieldGen++;
     while (true) {
       // Find the minimum doc across all cursors
-      int minDoc = Column.NO_MORE_DOCS;
+      int minDoc = SparseColumn.NO_MORE_DOCS;
       for (int i = 0; i < numRowCols; i++) {
         if (nextDocs[i] < minDoc) {
           minDoc = nextDocs[i];
         }
       }
-      if (minDoc == Column.NO_MORE_DOCS) {
+      if (minDoc == SparseColumn.NO_MORE_DOCS) {
         break;
       }
       if (minDoc < 0 || minDoc >= numDocs) {
@@ -814,7 +831,7 @@ final class IndexingChain implements Accountable {
               pf.fieldGen = fieldGen;
               pf.reset(segDocID, adapters[i].column.fieldType());
             }
-            if (processField(segDocID, adapters[i], pf)) {
+            if (processRowField(segDocID, adapters[i], pf)) {
               fields[indexedFieldCount] = pf;
               indexedFieldCount++;
             }
@@ -843,15 +860,17 @@ final class IndexingChain implements Accountable {
 
   /**
    * Lightweight adapter that presents a column's current cursor value as an {@link IndexableField},
-   * so it can be passed to {@link #processField}. One instance is reused per column across all
-   * documents.
+   * so it can be passed to {@link #processRowField}. Extends {@link Field} so that {@code name()}
+   * and {@code fieldType()} resolve to final field reads rather than virtual dispatch. One instance
+   * is reused per column across all documents.
    */
-  private static class ColumnFieldAdapter implements IndexableField {
-    final Column column;
+  private static class ColumnFieldAdapter extends Field {
+    final SparseColumn column;
     private final StoredValue reusableStoredValue;
     private final boolean tokenized;
 
-    ColumnFieldAdapter(Column column) {
+    ColumnFieldAdapter(SparseColumn column) {
+      super(column.name(), column.fieldType());
       this.column = column;
       this.tokenized = column.fieldType().tokenized();
       if (column.fieldType().stored()) {
@@ -860,16 +879,6 @@ final class IndexingChain implements Accountable {
       } else {
         this.reusableStoredValue = null;
       }
-    }
-
-    @Override
-    public String name() {
-      return column.name();
-    }
-
-    @Override
-    public IndexableFieldType fieldType() {
-      return column.fieldType();
     }
 
     @Override
@@ -884,11 +893,6 @@ final class IndexingChain implements Accountable {
         return new String(
             ref.bytes, ref.offset, ref.length, java.nio.charset.StandardCharsets.UTF_8);
       }
-      return null;
-    }
-
-    @Override
-    public Reader readerValue() {
       return null;
     }
 
@@ -947,7 +951,7 @@ final class IndexingChain implements Accountable {
       case NUMERIC -> {
         NumericDocValuesWriter writer = (NumericDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.longValue());
         }
@@ -955,7 +959,7 @@ final class IndexingChain implements Accountable {
       case SORTED_NUMERIC -> {
         SortedNumericDocValuesWriter writer = (SortedNumericDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.longValue());
         }
@@ -964,6 +968,107 @@ final class IndexingChain implements Accountable {
           throw new IllegalArgumentException(
               "LongColumn \"" + column.name() + "\" has incompatible docValuesType: " + dvType);
     }
+  }
+
+  private void processDenseLongColumn(
+      int baseDocID, int numDocs, DenseLongColumn column, PerField pf, DocValuesType dvType) {
+    int consumed;
+    switch (dvType) {
+      case NUMERIC -> {
+        NumericDocValuesWriter writer = (NumericDocValuesWriter) pf.docValuesWriter;
+        int docID = baseDocID;
+        LongsRef values;
+        while ((values = column.nextLongs()) != null) {
+          checkDenseBounds(column, docID - baseDocID, values.length, numDocs);
+          writer.addDenseValues(docID, values);
+          docID += values.length;
+        }
+        consumed = docID - baseDocID;
+      }
+      case SORTED_NUMERIC -> {
+        SortedNumericDocValuesWriter writer = (SortedNumericDocValuesWriter) pf.docValuesWriter;
+        int docID = baseDocID;
+        LongsRef values;
+        while ((values = column.nextLongs()) != null) {
+          checkDenseBounds(column, docID - baseDocID, values.length, numDocs);
+          writer.addDenseValues(docID, values);
+          docID += values.length;
+        }
+        consumed = docID - baseDocID;
+      }
+      default ->
+          throw new IllegalArgumentException(
+              "DenseLongColumn \""
+                  + column.name()
+                  + "\" has incompatible docValuesType: "
+                  + dvType);
+    }
+    checkDenseCount(column, consumed, numDocs);
+  }
+
+  private static void checkDenseBounds(Column column, int consumed, int chunkSize, int numDocs) {
+    if (consumed + chunkSize > numDocs) {
+      throw new IllegalArgumentException(
+          "Dense column \""
+              + column.name()
+              + "\" would exceed batch size: "
+              + (consumed + chunkSize)
+              + " values but batch has "
+              + numDocs
+              + " documents");
+    }
+  }
+
+  private static void checkDenseCount(Column column, int consumed, int numDocs) {
+    if (consumed != numDocs) {
+      throw new IllegalArgumentException(
+          "Dense column \""
+              + column.name()
+              + "\" provided "
+              + consumed
+              + " values but batch has "
+              + numDocs
+              + " documents");
+    }
+  }
+
+  private void processDenseBinaryColumn(
+      int baseDocID, int numDocs, DenseBinaryColumn column, PerField pf, DocValuesType dvType) {
+    java.nio.ByteOrder byteOrder = column.byteOrder();
+    int consumed;
+    switch (dvType) {
+      case NUMERIC -> {
+        NumericDocValuesWriter writer = (NumericDocValuesWriter) pf.docValuesWriter;
+        int docID = baseDocID;
+        BytesRef values;
+        while ((values = column.nextBytes()) != null) {
+          int chunkDocs = values.length >> 3;
+          checkDenseBounds(column, docID - baseDocID, chunkDocs, numDocs);
+          writer.addDenseValues(docID, byteOrder, values);
+          docID += chunkDocs;
+        }
+        consumed = docID - baseDocID;
+      }
+      case SORTED_NUMERIC -> {
+        SortedNumericDocValuesWriter writer = (SortedNumericDocValuesWriter) pf.docValuesWriter;
+        int docID = baseDocID;
+        BytesRef values;
+        while ((values = column.nextBytes()) != null) {
+          int chunkDocs = values.length >> 3;
+          checkDenseBounds(column, docID - baseDocID, chunkDocs, numDocs);
+          writer.addDenseValues(docID, byteOrder, values);
+          docID += chunkDocs;
+        }
+        consumed = docID - baseDocID;
+      }
+      default ->
+          throw new IllegalArgumentException(
+              "DenseBinaryColumn \""
+                  + column.name()
+                  + "\" has incompatible docValuesType: "
+                  + dvType);
+    }
+    checkDenseCount(column, consumed, numDocs);
   }
 
   private void processBinaryColumn(
@@ -990,7 +1095,7 @@ final class IndexingChain implements Accountable {
       case BINARY -> {
         BinaryDocValuesWriter writer = (BinaryDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.binaryValue());
         }
@@ -998,7 +1103,7 @@ final class IndexingChain implements Accountable {
       case SORTED -> {
         SortedDocValuesWriter writer = (SortedDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.binaryValue());
         }
@@ -1006,7 +1111,7 @@ final class IndexingChain implements Accountable {
       case SORTED_SET -> {
         SortedSetDocValuesWriter writer = (SortedSetDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           writer.addValue(baseDocID + batchDocID, column.binaryValue());
         }
@@ -1021,7 +1126,7 @@ final class IndexingChain implements Accountable {
       throws IOException {
     PointValuesWriter writer = pf.pointValuesWriter;
     int batchDocID;
-    while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+    while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
       checkDocID(column, batchDocID, numDocs);
       writer.addPackedValue(baseDocID + batchDocID, column.binaryValue());
     }
@@ -1035,7 +1140,7 @@ final class IndexingChain implements Accountable {
       case BINARY -> {
         BinaryDocValuesWriter dvWriter = (BinaryDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           int segDocID = baseDocID + batchDocID;
           BytesRef value = column.binaryValue();
@@ -1046,7 +1151,7 @@ final class IndexingChain implements Accountable {
       case SORTED -> {
         SortedDocValuesWriter dvWriter = (SortedDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           int segDocID = baseDocID + batchDocID;
           BytesRef value = column.binaryValue();
@@ -1057,7 +1162,7 @@ final class IndexingChain implements Accountable {
       case SORTED_SET -> {
         SortedSetDocValuesWriter dvWriter = (SortedSetDocValuesWriter) pf.docValuesWriter;
         int batchDocID;
-        while ((batchDocID = column.nextDoc()) != Column.NO_MORE_DOCS) {
+        while ((batchDocID = column.nextDoc()) != SparseColumn.NO_MORE_DOCS) {
           checkDocID(column, batchDocID, numDocs);
           int segDocID = baseDocID + batchDocID;
           BytesRef value = column.binaryValue();
@@ -1071,7 +1176,7 @@ final class IndexingChain implements Accountable {
     }
   }
 
-  private static void checkDocID(Column column, int batchDocID, int numDocs) {
+  private static void checkDocID(SparseColumn column, int batchDocID, int numDocs) {
     if (batchDocID < 0 || batchDocID >= numDocs) {
       throw new IllegalArgumentException(
           "Column \""
@@ -1173,6 +1278,51 @@ final class IndexingChain implements Accountable {
         throw th;
       }
     }
+  }
+
+  /**
+   * Processes only row-oriented features (stored fields and term inversion) for a batch column
+   * field. Doc values, points, and vectors are handled in the column-oriented pass. Returns {@code
+   * true} if this is a unique indexed field with postings.
+   */
+  private boolean processRowField(int docID, IndexableField field, PerField pf) throws IOException {
+    IndexableFieldType fieldType = field.fieldType();
+    boolean indexedField = false;
+
+    // Invert indexed fields
+    if (fieldType.indexOptions() != IndexOptions.NONE) {
+      if (pf.first) { // first time we see this field in this doc
+        pf.invert(docID, field, true);
+        pf.first = false;
+        indexedField = true;
+      } else {
+        pf.invert(docID, field, false);
+      }
+    }
+
+    // Add stored fields
+    if (fieldType.stored()) {
+      StoredValue storedValue = field.storedValue();
+      if (storedValue == null) {
+        throw new IllegalArgumentException("Cannot store a null value");
+      } else if (storedValue.getType() == StoredValue.Type.STRING
+          && storedValue.getStringValue().length() > IndexWriter.MAX_STORED_STRING_LENGTH) {
+        throw new IllegalArgumentException(
+            "stored field \""
+                + field.name()
+                + "\" is too large ("
+                + storedValue.getStringValue().length()
+                + " characters) to store");
+      }
+      try {
+        storedFieldsConsumer.writeField(pf.fieldInfo, storedValue);
+      } catch (Throwable th) {
+        onAbortingException(th);
+        throw th;
+      }
+    }
+
+    return indexedField;
   }
 
   /** Index each field Returns {@code true}, if we are indexing a unique field with postings */

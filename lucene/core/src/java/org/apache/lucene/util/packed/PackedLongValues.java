@@ -18,8 +18,11 @@ package org.apache.lucene.util.packed;
 
 import static org.apache.lucene.util.packed.PackedInts.checkBlockSize;
 
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.ArrayUtil;
+import org.apache.lucene.util.BitUtil;
 import org.apache.lucene.util.LongValues;
 import org.apache.lucene.util.RamUsageEstimator;
 
@@ -234,17 +237,69 @@ public class PackedLongValues extends LongValues implements Accountable {
       if (pending == null) {
         throw new IllegalStateException("Cannot be reused after build()");
       }
+      packIfFull();
+      pending[pendingOff++] = l;
+      size += 1;
+      return this;
+    }
+
+    /** Add multiple elements to this builder in bulk. */
+    public Builder add(long[] values, int offset, int length) {
+      if (pending == null) {
+        throw new IllegalStateException("Cannot be reused after build()");
+      }
+      int remaining = length;
+      int srcOff = offset;
+      while (remaining > 0) {
+        packIfFull();
+        int toCopy = Math.min(remaining, pending.length - pendingOff);
+        System.arraycopy(values, srcOff, pending, pendingOff, toCopy);
+        pendingOff += toCopy;
+        srcOff += toCopy;
+        remaining -= toCopy;
+        size += toCopy;
+      }
+      return this;
+    }
+
+    /**
+     * Add multiple elements from a byte array interpreted as longs in the given byte order. The
+     * byte range must be aligned to 8 bytes (Long.BYTES).
+     */
+    public Builder add(ByteOrder byteOrder, byte[] bytes, int offset, int length) {
+      if (pending == null) {
+        throw new IllegalStateException("Cannot be reused after build()");
+      }
+      if ((length & 7) != 0) {
+        throw new IllegalArgumentException(
+            "length must be a multiple of Long.BYTES: length=" + length);
+      }
+      final VarHandle vh =
+          byteOrder == ByteOrder.LITTLE_ENDIAN ? BitUtil.VH_LE_LONG : BitUtil.VH_BE_LONG;
+      int remaining = length >> 3; // number of longs
+      int srcOff = offset;
+      while (remaining > 0) {
+        packIfFull();
+        int toCopy = Math.min(remaining, pending.length - pendingOff);
+        for (int i = 0; i < toCopy; i++) {
+          pending[pendingOff + i] = (long) vh.get(bytes, srcOff);
+          srcOff += Long.BYTES;
+        }
+        pendingOff += toCopy;
+        remaining -= toCopy;
+        size += toCopy;
+      }
+      return this;
+    }
+
+    private void packIfFull() {
       if (pendingOff == pending.length) {
-        // check size
         if (values.length == valuesOff) {
           final int newLength = ArrayUtil.oversize(valuesOff + 1, 8);
           grow(newLength);
         }
         pack();
       }
-      pending[pendingOff++] = l;
-      size += 1;
-      return this;
     }
 
     final void finish() {
