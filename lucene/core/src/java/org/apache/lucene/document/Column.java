@@ -20,12 +20,13 @@ import java.util.Objects;
 import org.apache.lucene.index.IndexableFieldType;
 
 /**
- * A single field's values across multiple documents in a {@link Batch}. Each Column has a name and
- * a field type.
+ * A single field's values across multiple documents in a {@link Batch}. A Column carries only
+ * metadata (name and field type); iteration is performed via cursors obtained from {@link
+ * LongColumn} or {@link BinaryColumn}.
  *
- * <p>Subclasses provide different iteration models: {@link SparseColumn} for sparse doc-id
- * iteration (where not every document has a value), and {@link DenseLongColumn} for dense bulk
- * access (where every document has a value).
+ * <p>Each call that requests a cursor returns a fresh cursor positioned at the first value, so
+ * columns can be consumed multiple times (for example, once in the row-oriented pass for stored
+ * fields and again in the column-oriented pass for doc values).
  *
  * @lucene.experimental
  */
@@ -54,10 +55,4 @@ public abstract class Column {
   public IndexableFieldType fieldType() {
     return fieldType;
   }
-
-  /**
-   * Resets the cursor to its initial state, allowing the column to be iterated again from the
-   * beginning.
-   */
-  public abstract void reset();
 }

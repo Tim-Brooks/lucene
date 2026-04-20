@@ -79,15 +79,25 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
   }
 
   public void addDenseValues(int firstDocID, ByteOrder byteOrder, BytesRef values) {
-    if ((values.length & 7) != 0) {
+    addDenseValues(firstDocID, byteOrder, Long.BYTES, values);
+  }
+
+  public void addDenseValues(int firstDocID, ByteOrder byteOrder, int byteWidth, BytesRef values) {
+    if (byteWidth != Integer.BYTES && byteWidth != Long.BYTES) {
+      throw new IllegalArgumentException("byteWidth must be 4 or 8: byteWidth=" + byteWidth);
+    }
+    if ((values.length % byteWidth) != 0) {
       throw new IllegalArgumentException(
-          "BytesRef length must be a multiple of Long.BYTES: length=" + values.length);
+          "BytesRef length must be a multiple of byteWidth="
+              + byteWidth
+              + ": length="
+              + values.length);
     }
     assert firstDocID > lastDocID;
 
-    int numValues = values.length >> 3;
+    int numValues = values.length / byteWidth;
 
-    pending.add(byteOrder, values.bytes, values.offset, values.length);
+    pending.add(byteOrder, byteWidth, values.bytes, values.offset, values.length);
     docsWithField.addRange(firstDocID, firstDocID + numValues);
 
     updateBytesUsed();

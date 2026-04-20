@@ -21,30 +21,30 @@ import org.apache.lucene.index.IndexableFieldType;
 /**
  * A {@link Column} that provides long values. Used for {@link
  * org.apache.lucene.index.DocValuesType#NUMERIC NUMERIC} and {@link
- * org.apache.lucene.index.DocValuesType#SORTED_NUMERIC SORTED_NUMERIC} doc values.
+ * org.apache.lucene.index.DocValuesType#SORTED_NUMERIC SORTED_NUMERIC} doc values and for stored
+ * long fields.
  *
- * <p>The cursor is advanced by calling {@link #nextDoc()}, which returns the next batch-local
- * doc-id that has a value, or {@link #NO_MORE_DOCS} when exhausted. After {@code nextDoc()} returns
- * a valid doc-id, call {@link #longValue()} to retrieve the value.
- *
- * <p>For single-valued fields (NUMERIC), doc-ids are strictly increasing. For multi-valued fields
- * (SORTED_NUMERIC), the same doc-id may appear multiple times (once per value), in non-decreasing
- * order.
+ * <p>Iteration is performed via cursors. {@link #tuples()} is always available and yields {@code
+ * (docID, longValue)} pairs. {@link #values()} is an optional dense bulk cursor that returns every
+ * doc's value in batch order; it returns {@code null} if the column is not dense.
  *
  * @lucene.experimental
  */
-public abstract class LongColumn extends SparseColumn {
+public abstract class LongColumn extends Column {
 
   /** Creates a LongColumn with the given field name and type. */
   protected LongColumn(String name, IndexableFieldType fieldType) {
     super(name, fieldType);
   }
 
+  /** Returns a fresh tuple cursor starting at the beginning of the batch. */
+  public abstract LongTupleCursor tuples();
+
   /**
-   * Returns the long value for the current cursor position. Must only be called after {@link
-   * #nextDoc()} returns a valid doc-id.
-   *
-   * @return the long value
+   * Returns a fresh values cursor iterating dense long values for doc-ids {@code [0, numDocs)}, or
+   * {@code null} if the column is not dense. The default implementation returns {@code null}.
    */
-  public abstract long longValue();
+  public LongValuesCursor values() {
+    return null;
+  }
 }
