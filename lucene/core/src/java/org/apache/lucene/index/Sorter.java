@@ -58,6 +58,8 @@ public final class Sorter {
     /** Given the ordinal of a doc ID, return its doc ID in the original index. */
     public abstract int newToOld(int docID);
 
+    public void pack() {}
+
     /**
      * Return the number of documents in this map. This must be equal to the {@link
      * org.apache.lucene.index.LeafReader#maxDoc() number of documents} of the {@link
@@ -168,30 +170,7 @@ public final class Sorter {
       docs[(int) newToOld.get(i)] = i;
     } // docs is now the oldToNew mapping
 
-    final PackedLongValues.Builder oldToNewBuilder =
-        PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
-    for (int i = 0; i < maxDoc; ++i) {
-      oldToNewBuilder.add(docs[i]);
-    }
-    final PackedLongValues oldToNew = oldToNewBuilder.build();
-
-    return new Sorter.DocMap() {
-
-      @Override
-      public int oldToNew(int docID) {
-        return (int) oldToNew.get(docID);
-      }
-
-      @Override
-      public int newToOld(int docID) {
-        return (int) newToOld.get(docID);
-      }
-
-      @Override
-      public int size() {
-        return maxDoc;
-      }
-    };
+    return new PackableDocMap(docs, newToOld, maxDoc);
   }
 
   /**
@@ -269,5 +248,56 @@ public final class Sorter {
   @Override
   public String toString() {
     return getID();
+  }
+
+  private static class PackableDocMap extends DocMap {
+
+    private final PackedLongValues newToOld;
+    private final int maxDoc;
+
+    private volatile int[] oldToNewUnpacked;
+    private PackedLongValues oldToNewPacked;
+
+    public PackableDocMap(int[] oldToNew, PackedLongValues newToOld, int maxDoc) {
+      this.oldToNewUnpacked = oldToNew;
+      this.newToOld = newToOld;
+      this.maxDoc = maxDoc;
+    }
+
+    @Override
+    public int oldToNew(int docID) {
+      int[] oldToNewUnpackedLocal = oldToNewUnpacked;
+      if (oldToNewUnpackedLocal != null) {
+        return oldToNewUnpackedLocal[docID];
+      } else {
+        return (int) oldToNewPacked.get(docID);
+      }
+    }
+
+    @Override
+    public int newToOld(int docID) {
+      return (int) newToOld.get(docID);
+    }
+
+    @Override
+    public void pack() {
+      synchronized (this) {
+        if (oldToNewPacked != null) {
+          return;
+        }
+        final PackedLongValues.Builder oldToNewBuilder =
+            PackedLongValues.monotonicBuilder(PackedInts.COMPACT);
+        for (int i = 0; i < maxDoc; ++i) {
+          oldToNewBuilder.add(oldToNewUnpacked[i]);
+        }
+        oldToNewPacked = oldToNewBuilder.build();
+        oldToNewUnpacked = null;
+      }
+    }
+
+    @Override
+    public int size() {
+      return maxDoc;
+    }
   }
 }

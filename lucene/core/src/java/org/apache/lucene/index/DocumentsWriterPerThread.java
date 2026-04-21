@@ -553,6 +553,9 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
               flushState.delCountOnFlush,
               sortMap);
       sealFlushedSegment(fs, sortMap, flushNotifications);
+      if (sortMap != null) {
+        sortMap.pack();
+      }
       if (infoStream.isEnabled("DWPT")) {
         infoStream.message(
             "DWPT",
