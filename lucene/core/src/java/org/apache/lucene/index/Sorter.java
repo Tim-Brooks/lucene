@@ -58,6 +58,9 @@ public final class Sorter {
     /** Given the ordinal of a doc ID, return its doc ID in the original index. */
     public abstract int newToOld(int docID);
 
+      /**
+       * Pack the the internal representations into more compact forms.
+       */
     public void pack() {}
 
     /**
