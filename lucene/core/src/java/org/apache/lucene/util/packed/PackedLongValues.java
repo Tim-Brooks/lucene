@@ -18,8 +18,8 @@ package org.apache.lucene.util.packed;
 
 import static org.apache.lucene.util.packed.PackedInts.checkBlockSize;
 
-import java.lang.invoke.VarHandle;
 import java.nio.ByteOrder;
+import org.apache.lucene.document.column.LongValuesCursor;
 import org.apache.lucene.util.Accountable;
 import org.apache.lucene.util.ArrayUtil;
 import org.apache.lucene.util.BitUtil;
@@ -243,6 +243,26 @@ public class PackedLongValues extends LongValues implements Accountable {
       return this;
     }
 
+    /**
+     * Add all values produced by the given {@link LongValuesCursor} in bulk. The cursor's {@link
+     * LongValuesCursor#size()} is used as the bounds: exactly that many values are pulled.
+     */
+    public Builder add(LongValuesCursor cursor) {
+      if (pending == null) {
+        throw new IllegalStateException("Cannot be reused after build()");
+      }
+      int remaining = cursor.size();
+      while (remaining > 0) {
+        packIfFull();
+        int toFill = Math.min(remaining, pending.length - pendingOff);
+        cursor.fill(pending, pendingOff, toFill);
+        pendingOff += toFill;
+        remaining -= toFill;
+        size += toFill;
+      }
+      return this;
+    }
+
     /** Add multiple elements to this builder in bulk. */
     public Builder add(long[] values, int offset, int length) {
       if (pending == null) {
@@ -267,23 +287,56 @@ public class PackedLongValues extends LongValues implements Accountable {
      * byte range must be aligned to 8 bytes (Long.BYTES).
      */
     public Builder add(ByteOrder byteOrder, byte[] bytes, int offset, int length) {
+      return add(byteOrder, Long.BYTES, bytes, offset, length);
+    }
+
+    /**
+     * Add multiple elements from a byte array interpreted as fixed-width integers in the given byte
+     * order. Supported widths are {@code 4} (sign-extended to long) and {@code 8}. The byte range
+     * must be aligned to {@code byteWidth}.
+     */
+    public Builder add(ByteOrder byteOrder, int byteWidth, byte[] bytes, int offset, int length) {
       if (pending == null) {
         throw new IllegalStateException("Cannot be reused after build()");
       }
-      if ((length & 7) != 0) {
-        throw new IllegalArgumentException(
-            "length must be a multiple of Long.BYTES: length=" + length);
+      if (byteWidth != Integer.BYTES && byteWidth != Long.BYTES) {
+        throw new IllegalArgumentException("byteWidth must be 4 or 8: byteWidth=" + byteWidth);
       }
-      final VarHandle vh =
-          byteOrder == ByteOrder.LITTLE_ENDIAN ? BitUtil.VH_LE_LONG : BitUtil.VH_BE_LONG;
-      int remaining = length >> 3; // number of longs
+      if ((length % byteWidth) != 0) {
+        throw new IllegalArgumentException(
+            "length must be a multiple of byteWidth=" + byteWidth + ": length=" + length);
+      }
+      final boolean isLong = byteWidth == Long.BYTES;
+      final boolean isLE = byteOrder == ByteOrder.LITTLE_ENDIAN;
+      int remaining = length / byteWidth;
       int srcOff = offset;
       while (remaining > 0) {
         packIfFull();
         int toCopy = Math.min(remaining, pending.length - pendingOff);
-        for (int i = 0; i < toCopy; i++) {
-          pending[pendingOff + i] = (long) vh.get(bytes, srcOff);
-          srcOff += Long.BYTES;
+        if (isLong) {
+          if (isLE) {
+            for (int i = 0; i < toCopy; i++) {
+              pending[pendingOff + i] = (long) BitUtil.VH_LE_LONG.get(bytes, srcOff);
+              srcOff += Long.BYTES;
+            }
+          } else {
+            for (int i = 0; i < toCopy; i++) {
+              pending[pendingOff + i] = (long) BitUtil.VH_BE_LONG.get(bytes, srcOff);
+              srcOff += Long.BYTES;
+            }
+          }
+        } else {
+          if (isLE) {
+            for (int i = 0; i < toCopy; i++) {
+              pending[pendingOff + i] = (int) BitUtil.VH_LE_INT.get(bytes, srcOff);
+              srcOff += Integer.BYTES;
+            }
+          } else {
+            for (int i = 0; i < toCopy; i++) {
+              pending[pendingOff + i] = (int) BitUtil.VH_BE_INT.get(bytes, srcOff);
+              srcOff += Integer.BYTES;
+            }
+          }
         }
         pendingOff += toCopy;
         remaining -= toCopy;

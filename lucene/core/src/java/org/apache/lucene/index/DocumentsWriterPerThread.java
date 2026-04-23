@@ -32,7 +32,7 @@ import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.Lock;
 import java.util.concurrent.locks.ReentrantLock;
 import org.apache.lucene.codecs.Codec;
-import org.apache.lucene.document.Batch;
+import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.index.DocumentsWriterDeleteQueue.DeleteSlice;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.Directory;
@@ -286,7 +286,7 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
   }
 
   long updateBatch(
-      Batch batch,
+      ColumnBatch columnBatch,
       DocumentsWriterDeleteQueue.Node<?> deleteNode,
       DocumentsWriter.FlushNotifications flushNotifications,
       Runnable onNewDocOnRAM)
@@ -305,7 +305,7 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
                 + segmentInfo.name);
       }
       final int docsInRamBefore = numDocsInRAM;
-      final int numDocs = batch.numDocs();
+      final int numDocs = columnBatch.numDocs();
       boolean allDocsIndexed = false;
       try {
         // Reserve all doc IDs upfront and account for them in numDocsInRAM immediately,
@@ -320,7 +320,7 @@ final class DocumentsWriterPerThread implements Accountable, Lock {
           onNewDocOnRAM.run();
         }
 
-        indexingChain.processBatch(docsInRamBefore, batch);
+        indexingChain.processBatch(docsInRamBefore, columnBatch);
 
         if (numDocs > 1) {
           segmentInfo.setHasBlocks();

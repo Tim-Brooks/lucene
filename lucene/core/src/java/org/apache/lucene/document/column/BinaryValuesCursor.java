@@ -14,29 +14,26 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package org.apache.lucene.document;
+package org.apache.lucene.document.column;
+
+import org.apache.lucene.util.BytesRef;
 
 /**
- * A column-oriented batch of documents for indexing. A Batch contains a collection of {@link
- * Column}s, where each Column represents a single field across all documents in the batch.
- * Documents are identified by batch-local IDs from 0 (inclusive) to {@link #numDocs()} (exclusive).
+ * A values cursor over a dense {@link NumericBinaryColumn}. Each call to {@link #nextValues()}
+ * returns the next chunk of packed bytes; the length of each returned {@link BytesRef} must be a
+ * multiple of the column's {@link NumericBinaryColumn#fixedSize()}. Across all calls, exactly
+ * {@code numDocs} values (chunks of length {@code fixedSize} each) must be produced.
  *
  * @lucene.experimental
  */
-public abstract class Batch {
+public abstract class BinaryValuesCursor {
 
-  /** Sole constructor. (For invocation by subclass constructors, typically implicit.) */
-  protected Batch() {}
-
-  /**
-   * Returns the number of documents in this batch. All column doc-ids must be in the range [0,
-   * numDocs()).
-   */
-  public abstract int numDocs();
+  /** Sole constructor. */
+  protected BinaryValuesCursor() {}
 
   /**
-   * Returns the columns in this batch. Each column represents a single field across the documents
-   * in the batch.
+   * Returns the next chunk of packed bytes, or {@code null} when the cursor is exhausted. The
+   * returned {@link BytesRef} is only valid until the next call to {@code nextBytes()}.
    */
-  public abstract Iterable<Column> columns();
+  public abstract BytesRef nextValues();
 }

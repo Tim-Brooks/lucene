@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Supplier;
 import java.util.function.ToLongFunction;
-import org.apache.lucene.document.Batch;
+import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.index.DocumentsWriterPerThread.FlushedSegment;
 import org.apache.lucene.search.Query;
 import org.apache.lucene.store.AlreadyClosedException;
@@ -451,7 +451,7 @@ final class DocumentsWriter implements Closeable, Accountable {
     return seqNo;
   }
 
-  long updateBatch(final Batch batch, final DocumentsWriterDeleteQueue.Node<?> delNode)
+  long updateBatch(final ColumnBatch columnBatch, final DocumentsWriterDeleteQueue.Node<?> delNode)
       throws IOException {
     boolean hasEvents = preUpdate();
 
@@ -464,7 +464,9 @@ final class DocumentsWriter implements Closeable, Accountable {
       // waits for all DWPT to be released:
       ensureOpen();
       try {
-        seqNo = dwpt.updateBatch(batch, delNode, flushNotifications, numDocsInRAM::incrementAndGet);
+        seqNo =
+            dwpt.updateBatch(
+                columnBatch, delNode, flushNotifications, numDocsInRAM::incrementAndGet);
       } finally {
         if (dwpt.isAborted()) {
           flushControl.doOnAbort(dwpt);

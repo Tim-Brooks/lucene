@@ -53,8 +53,8 @@ import java.util.stream.StreamSupport;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.codecs.Codec;
 import org.apache.lucene.codecs.FieldInfosFormat;
-import org.apache.lucene.document.Batch;
 import org.apache.lucene.document.Field;
+import org.apache.lucene.document.column.ColumnBatch;
 import org.apache.lucene.index.DocValuesUpdate.BinaryDocValuesUpdate;
 import org.apache.lucene.index.DocValuesUpdate.NumericDocValuesUpdate;
 import org.apache.lucene.index.FieldInfos.FieldNumbers;
@@ -1536,21 +1536,22 @@ public class IndexWriter
    * Adds a batch of documents in column-oriented format. The batch's columns are processed
    * field-by-field rather than document-by-document.
    *
-   * @param batch the column-oriented batch of documents to add
+   * @param columnBatch the column-oriented batch of documents to add
    * @return The <a href="#sequence_number">sequence number</a> for this operation
    * @throws IOException if there is a low-level IO error
    * @lucene.experimental
    */
-  public long addBatch(Batch batch) throws IOException {
-    return updateBatch(null, batch);
+  public long addBatch(ColumnBatch columnBatch) throws IOException {
+    return updateBatch(null, columnBatch);
   }
 
-  private long updateBatch(final DocumentsWriterDeleteQueue.Node<?> delNode, Batch batch)
+  private long updateBatch(
+      final DocumentsWriterDeleteQueue.Node<?> delNode, ColumnBatch columnBatch)
       throws IOException {
     ensureOpen();
     boolean success = false;
     try {
-      final long seqNo = maybeProcessEvents(docWriter.updateBatch(batch, delNode));
+      final long seqNo = maybeProcessEvents(docWriter.updateBatch(columnBatch, delNode));
       success = true;
       return seqNo;
     } catch (Error tragedy) {
