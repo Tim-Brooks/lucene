@@ -776,6 +776,45 @@ public class TestFixedBitSet extends BaseBitSetTestCase<FixedBitSet> {
     assertEquals(expected, actual);
   }
 
+  public void testBitSetIteratorSetDocId() throws IOException {
+    // Bits spread across multiple words (word boundary is at every 64 bits)
+    FixedBitSet bitSet = new FixedBitSet(300);
+    bitSet.set(5); // word 0
+    bitSet.set(10); // word 0
+    bitSet.set(63); // word 0, last bit
+    bitSet.set(64); // word 1, first bit
+    bitSet.set(200); // word 3
+
+    BitSetIterator iter = new BitSetIterator(bitSet, bitSet.cardinality());
+
+    // setDocId then nextDoc within the same word
+    iter.setDocId(5);
+    assertEquals(10, iter.nextDoc());
+    assertEquals(63, iter.nextDoc());
+
+    // setDocId at last bit of a word; nextDoc should cross into the next word
+    iter.setDocId(63);
+    assertEquals(64, iter.nextDoc());
+    assertEquals(200, iter.nextDoc());
+    assertEquals(DocIdSetIterator.NO_MORE_DOCS, iter.nextDoc());
+
+    // setDocId(-1) resets to initial state; iteration restarts from the beginning
+    iter.setDocId(-1);
+    assertEquals(5, iter.nextDoc());
+
+    // setDocId then advance
+    iter.setDocId(10);
+    assertEquals(200, iter.advance(100));
+
+    // backward repositioning within the same word
+    iter.setDocId(5);
+    assertEquals(10, iter.nextDoc());
+
+    iter.setDocId(7); // 7 is not set; next set bit is 10
+    assertEquals(10, iter.nextDoc());
+    assertEquals(63, iter.nextDoc());
+  }
+
   public void testIntoArray() throws Exception {
     for (int outerIter = 0; outerIter < 100; outerIter++) {
       int numBits = TestUtil.nextInt(random(), 10, 1_000);

@@ -199,10 +199,8 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
 
     SortingNumericDocValues(NumericDVs dvs) {
       this.dvs = dvs;
-      this.disi =
-          dvs.docsWithField() != null
-              ? new BitSetIterator(dvs.docsWithField(), dvs.docsWithField().cardinality())
-              : null;
+      final BitSet bits = dvs.docsWithField();
+      this.disi = bits != null ? new BitSetIterator(bits, bits.cardinality()) : null;
     }
 
     @Override
@@ -227,7 +225,7 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     public boolean advanceExact(int target) throws IOException {
       // needed in IndexSorter#{Long|Int|Double|Float}Sorter
       docID = target;
-      return dvs.advanceExact(target);
+      return dvs.dense() || dvs.docsWithField().get(target);
     }
 
     @Override
@@ -238,7 +236,7 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     @Override
     public long cost() {
       if (cost == -1) {
-        cost = dvs.cost();
+        cost = dvs.dense() ? dvs.maxDoc() : dvs.docsWithField().cardinality();
       }
       return cost;
     }
@@ -250,18 +248,8 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
       return values.length;
     }
 
-    private boolean advanceExact(int target) {
-      if (docsWithField != null) {
-        return docsWithField.get(target);
-      }
-      return true;
-    }
-
-    private long cost() {
-      if (docsWithField != null) {
-        return docsWithField.cardinality();
-      }
-      return values.length;
+    boolean dense() {
+      return docsWithField == null;
     }
   }
 }

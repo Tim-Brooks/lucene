@@ -55,6 +55,13 @@ public class BitSetIterator extends AbstractDocIdSetIterator {
   private final int length;
   private final long cost;
 
+  // Word-level state for FixedBitSet fast path. null when bits is not a FixedBitSet.
+  private final long[] words;
+  // Current word index. -1 is a sentinel meaning the next advance() must reload the word, used to
+  // handle setDocId() repositioning and initial state uniformly.
+  private int wordIndex;
+  private long currentWord;
+
   /** Sole constructor. */
   public BitSetIterator(BitSet bits, long cost) {
     if (cost < 0) {
@@ -63,6 +70,9 @@ public class BitSetIterator extends AbstractDocIdSetIterator {
     this.bits = bits;
     this.length = bits.length();
     this.cost = cost;
+    this.words = bits instanceof FixedBitSet fbs ? fbs.getBits() : null;
+    this.wordIndex = -1;
+    this.currentWord = 0;
   }
 
   /** Return the wrapped {@link BitSet}. */
@@ -73,19 +83,68 @@ public class BitSetIterator extends AbstractDocIdSetIterator {
   /** Set the current doc id that this iterator is on. */
   public void setDocId(int docId) {
     this.doc = docId;
+    if (words != null) {
+      wordIndex = -1;
+    }
   }
 
   @Override
   public int nextDoc() {
+    if (words != null) {
+      if (wordIndex == -1) {
+        return advanceFixed(doc + 1);
+      }
+      currentWord &= currentWord - 1; // clear the bit we just returned
+      if (currentWord != 0) {
+        return doc = (wordIndex << 6) + Long.numberOfTrailingZeros(currentWord);
+      }
+      return nextDocAdvanceWord();
+    }
     return advance(doc + 1);
+  }
+
+  private int nextDocAdvanceWord() {
+    while (++wordIndex < words.length) {
+      currentWord = words[wordIndex];
+      if (currentWord != 0) {
+        return doc = (wordIndex << 6) + Long.numberOfTrailingZeros(currentWord);
+      }
+    }
+    return doc = NO_MORE_DOCS;
   }
 
   @Override
   public int advance(int target) {
+    assert docID() < target;
+    if (words != null) {
+      return advanceFixed(target);
+    }
     if (target >= length) {
       return doc = NO_MORE_DOCS;
     }
     return doc = bits.nextSetBit(target);
+  }
+
+  private int advanceFixed(int target) {
+    if (target >= length) {
+      return doc = NO_MORE_DOCS;
+    }
+    int newWordIndex = target >> 6;
+    if (newWordIndex != wordIndex) {
+      wordIndex = newWordIndex;
+      currentWord = words[wordIndex];
+    }
+    // Clear bits below target within the current word. When called from nextDoc() with
+    // target = doc + 1, this clears the bit we just returned along with anything below it.
+    currentWord &= ~0L << (target & 63);
+
+    while (currentWord == 0) {
+      if (++wordIndex >= words.length) {
+        return doc = NO_MORE_DOCS;
+      }
+      currentWord = words[wordIndex];
+    }
+    return doc = (wordIndex << 6) + Long.numberOfTrailingZeros(currentWord);
   }
 
   @Override
@@ -102,7 +161,7 @@ public class BitSetIterator extends AbstractDocIdSetIterator {
       // will throw an exception.
       actualUpto = MathUtil.unsignedMin(actualUpto, offset + bitSet.length());
       FixedBitSet.orRange(fixedBits, doc, bitSet, doc - offset, actualUpto - doc);
-      advance(actualUpto); // set the current doc
+      advance(actualUpto); // set the current doc, updating word-level state via advanceFixed
     }
     super.intoBitSet(upTo, bitSet, offset);
   }

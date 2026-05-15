@@ -435,7 +435,8 @@ class SortedSetDocValuesWriter extends DocValuesWriter<SortedSetDocValues> {
         throws IOException {
       long[] offsets = new long[maxDoc];
       PackedLongValues.Builder builder = PackedLongValues.packedBuilder(acceptableOverheadRatio);
-      GrowableWriter docValueCounts = new GrowableWriter(bitsPerValue, maxDoc, acceptableOverheadRatio);
+      GrowableWriter docValueCounts =
+          new GrowableWriter(bitsPerValue, maxDoc, acceptableOverheadRatio);
       long ordOffset = 1;
       int docID;
       while ((docID = oldValues.nextDoc()) != NO_MORE_DOCS) {
