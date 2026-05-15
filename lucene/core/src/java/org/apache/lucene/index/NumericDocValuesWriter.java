@@ -23,6 +23,7 @@ import org.apache.lucene.codecs.DocValuesConsumer;
 import org.apache.lucene.codecs.DocValuesProducer;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.util.BitSet;
+import org.apache.lucene.util.BitSetIterator;
 import org.apache.lucene.util.Counter;
 import org.apache.lucene.util.FixedBitSet;
 import org.apache.lucene.util.packed.PackedInts;
@@ -192,11 +193,16 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
   static class SortingNumericDocValues extends NumericDocValues {
 
     private final NumericDVs dvs;
+    private final BitSetIterator disi;
     private int docID = -1;
     private long cost = -1;
 
     SortingNumericDocValues(NumericDVs dvs) {
       this.dvs = dvs;
+      this.disi =
+          dvs.docsWithField() != null
+              ? new BitSetIterator(dvs.docsWithField(), dvs.docsWithField().cardinality())
+              : null;
     }
 
     @Override
@@ -205,13 +211,11 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     }
 
     @Override
-    public int nextDoc() {
-      if (docID + 1 == dvs.maxDoc()) {
-        docID = NO_MORE_DOCS;
-      } else {
-        docID = dvs.advance(docID + 1);
+    public int nextDoc() throws IOException {
+      if (disi != null) {
+        return docID = disi.nextDoc();
       }
-      return docID;
+      return docID = (docID + 1 < dvs.maxDoc()) ? docID + 1 : NO_MORE_DOCS;
     }
 
     @Override
@@ -228,7 +232,7 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
 
     @Override
     public long longValue() {
-      return dvs.values[docID];
+      return dvs.values()[docID];
     }
 
     @Override
@@ -240,19 +244,10 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     }
   }
 
-  static class NumericDVs {
-    private final long[] values;
-    private final BitSet docsWithField;
-    private final int maxDoc;
-
-    NumericDVs(long[] values, BitSet docsWithField) {
-      this.values = values;
-      this.docsWithField = docsWithField;
-      this.maxDoc = values.length;
-    }
+  record NumericDVs(long[] values, BitSet docsWithField) {
 
     int maxDoc() {
-      return maxDoc;
+      return values.length;
     }
 
     private boolean advanceExact(int target) {
@@ -262,20 +257,11 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
       return true;
     }
 
-    private int advance(int target) {
-      if (docsWithField != null) {
-        return docsWithField.nextSetBit(target);
-      }
-
-      // Only called when target is less than maxDoc
-      return target;
-    }
-
     private long cost() {
       if (docsWithField != null) {
         return docsWithField.cardinality();
       }
-      return maxDoc;
+      return values.length;
     }
   }
 }
