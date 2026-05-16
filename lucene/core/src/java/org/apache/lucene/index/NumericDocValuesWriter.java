@@ -225,7 +225,11 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     public boolean advanceExact(int target) throws IOException {
       // needed in IndexSorter#{Long|Int|Double|Float}Sorter
       docID = target;
-      return dvs.dense() || dvs.docsWithField().get(target);
+      if (disi != null) {
+        disi.setDocId(target);
+        return dvs.docsWithField().get(target);
+      }
+      return true; // dense: every doc has a value
     }
 
     @Override
