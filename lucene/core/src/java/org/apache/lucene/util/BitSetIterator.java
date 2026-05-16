@@ -80,12 +80,16 @@ public class BitSetIterator extends AbstractDocIdSetIterator {
     return bits;
   }
 
-  /** Set the current doc id that this iterator is on. */
-  public void setDocId(int docId) {
+  /**
+   * Set the current doc id that this iterator is on. Returns whether the bit at {@code docId} is
+   * set, or {@code false} if {@code docId} is negative.
+   */
+  public boolean setDocId(int docId) {
     this.doc = docId;
     if (words != null) {
       wordIndex = -1;
     }
+    return docId >= 0 && bits.get(docId);
   }
 
   @Override
