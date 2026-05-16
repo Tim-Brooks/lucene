@@ -126,7 +126,7 @@ class SortedNumericDocValuesWriter extends DocValuesWriter<SortedNumericDocValue
 
   record LongValues(long[] offsets, PackedLongValues values) {
 
-    LongValues(
+    static LongValues create(
         int maxDoc,
         Sorter.DocMap sortMap,
         SortedNumericDocValues oldValues,
@@ -147,7 +147,7 @@ class SortedNumericDocValuesWriter extends DocValuesWriter<SortedNumericDocValue
           offsetIndex++;
         }
       }
-      this(offsets, valuesBuilder.build());
+      return new LongValues(offsets, valuesBuilder.build());
     }
   }
 
@@ -191,7 +191,7 @@ class SortedNumericDocValuesWriter extends DocValuesWriter<SortedNumericDocValue
     final LongValues sorted;
     if (sortMap != null) {
       sorted =
-          new LongValues(
+          LongValues.create(
               state.segmentInfo.maxDoc(),
               sortMap,
               getValues(values, valueCounts, docsWithField),

@@ -229,7 +229,7 @@ class SortedSetDocValuesWriter extends DocValuesWriter<SortedSetDocValues> {
     final DocOrds docOrds;
     if (sortMap != null) {
       docOrds =
-          new DocOrds(
+          DocOrds.create(
               state.segmentInfo.maxDoc(),
               sortMap,
               getValues(sortedValues, ordMap, hash, ords, ordCounts, maxCount, docsWithField),
@@ -426,7 +426,7 @@ class SortedSetDocValuesWriter extends DocValuesWriter<SortedSetDocValues> {
 
     public static final int START_BITS_PER_VALUE = 2;
 
-    DocOrds(
+    static DocOrds create(
         int maxDoc,
         Sorter.DocMap sortMap,
         SortedSetDocValues oldValues,
@@ -452,7 +452,7 @@ class SortedSetDocValuesWriter extends DocValuesWriter<SortedSetDocValues> {
           offsets[newDocID] = startOffset;
         }
       }
-      this(offsets, builder.build(), docValueCounts);
+      return new DocOrds(offsets, builder.build(), docValueCounts);
     }
   }
 }

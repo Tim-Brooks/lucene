@@ -121,7 +121,7 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
     final BinaryDVs sorted;
     if (sortMap != null) {
       sorted =
-          new BinaryDVs(
+          BinaryDVs.create(
               state.segmentInfo.maxDoc(),
               sortMap,
               new BufferedBinaryDocValues(
@@ -252,7 +252,8 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
 
   record BinaryDVs(int[] offsets, BytesRefArray values) {
 
-    BinaryDVs(int maxDoc, Sorter.DocMap sortMap, BinaryDocValues oldValues) throws IOException {
+    static BinaryDVs create(int maxDoc, Sorter.DocMap sortMap, BinaryDocValues oldValues)
+        throws IOException {
       int[] offsets = new int[maxDoc];
       BytesRefArray values = new BytesRefArray(Counter.newCounter());
       int offset = 1; // 0 means no values for this document
@@ -262,7 +263,7 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
         values.append(oldValues.binaryValue());
         offsets[newDocID] = offset++;
       }
-      this(offsets, values);
+      return new BinaryDVs(offsets, values);
     }
   }
 }

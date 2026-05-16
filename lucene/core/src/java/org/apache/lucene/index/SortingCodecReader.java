@@ -649,7 +649,7 @@ public final class SortingCodecReader extends FilterCodecReader {
             getOrCreateDV(
                 field.name,
                 () ->
-                    new BinaryDocValuesWriter.BinaryDVs(
+                    BinaryDocValuesWriter.BinaryDVs.create(
                         maxDoc(), docMap, delegate.getBinary(field))));
       }
 
@@ -680,7 +680,7 @@ public final class SortingCodecReader extends FilterCodecReader {
             getOrCreateDV(
                 field.name,
                 () ->
-                    new SortedNumericDocValuesWriter.LongValues(
+                    SortedNumericDocValuesWriter.LongValues.create(
                         maxDoc(), docMap, oldDocValues, PackedInts.FAST)));
       }
 
@@ -692,7 +692,7 @@ public final class SortingCodecReader extends FilterCodecReader {
             getOrCreateDV(
                 field.name,
                 () ->
-                    new SortedSetDocValuesWriter.DocOrds(
+                    SortedSetDocValuesWriter.DocOrds.create(
                         maxDoc(),
                         docMap,
                         oldDocValues,
