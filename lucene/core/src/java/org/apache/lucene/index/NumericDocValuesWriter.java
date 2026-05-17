@@ -208,14 +208,15 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
 
   static class SortingNumericDocValues extends NumericDocValues {
 
-    private final NumericDVs dvs;
+    private final long[] values;
+    private final BitSet bits;
     private final BitSetIterator disi;
     private int docID = -1;
     private long cost = -1;
 
     SortingNumericDocValues(NumericDVs dvs) {
-      this.dvs = dvs;
-      final BitSet bits = dvs.docsWithField();
+      this.values = dvs.values();
+      this.bits = dvs.docsWithField();
       this.disi = bits != null ? new BitSetIterator(bits, bits.cardinality()) : null;
     }
 
@@ -229,7 +230,7 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
       if (disi != null) {
         return docID = disi.nextDoc();
       }
-      return docID = (docID + 1 < dvs.maxDoc()) ? docID + 1 : NO_MORE_DOCS;
+      return docID = (docID + 1 < values.length) ? docID + 1 : NO_MORE_DOCS;
     }
 
     @Override
@@ -246,26 +247,17 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
 
     @Override
     public long longValue() {
-      return dvs.values()[docID];
+      return values[docID];
     }
 
     @Override
     public long cost() {
       if (cost == -1) {
-        cost = dvs.dense() ? dvs.maxDoc() : dvs.docsWithField().cardinality();
+        cost = bits == null ? values.length : bits.cardinality();
       }
       return cost;
     }
   }
 
-  record NumericDVs(long[] values, BitSet docsWithField) {
-
-    int maxDoc() {
-      return values.length;
-    }
-
-    boolean dense() {
-      return docsWithField == null;
-    }
-  }
+  record NumericDVs(long[] values, BitSet docsWithField) {}
 }

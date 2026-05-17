@@ -159,7 +159,9 @@ class SortedNumericDocValuesWriter extends DocValuesWriter<SortedNumericDocValue
     return getValues(finalValues, finalValuesCount, docsWithField);
   }
 
-  record LongValues(long[] offsets, PackedLongValues values) {
+  static final class LongValues {
+    final long[] offsets;
+    final PackedLongValues values;
 
     LongValues(
         int maxDoc,
@@ -167,22 +169,22 @@ class SortedNumericDocValuesWriter extends DocValuesWriter<SortedNumericDocValue
         SortedNumericDocValues oldValues,
         float acceptableOverheadRatio)
         throws IOException {
-      long[] offsets = new long[maxDoc];
-      PackedLongValues.Builder valuesBuilder =
+      offsets = new long[maxDoc];
+      PackedLongValues.Builder valuesBuiler =
           PackedLongValues.packedBuilder(acceptableOverheadRatio);
       int docID;
       long offsetIndex = 1; // 0 means the doc has no values
       while ((docID = oldValues.nextDoc()) != NO_MORE_DOCS) {
         int newDocID = sortMap.oldToNew(docID);
         int numValues = oldValues.docValueCount();
-        valuesBuilder.add(numValues);
+        valuesBuiler.add(numValues);
         offsets[newDocID] = offsetIndex++;
         for (int i = 0; i < numValues; i++) {
-          valuesBuilder.add(oldValues.nextValue());
+          valuesBuiler.add(oldValues.nextValue());
           offsetIndex++;
         }
       }
-      this(offsets, valuesBuilder.build());
+      values = valuesBuiler.build();
     }
   }
 
