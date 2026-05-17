@@ -209,8 +209,8 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
   static class SortingNumericDocValues extends NumericDocValues {
 
     private final long[] values;
-    private final BitSet bits;
     private final BitSetIterator disi;
+    private final BitSet bits;
     private int docID = -1;
     private long cost = -1;
 
@@ -242,7 +242,11 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     public boolean advanceExact(int target) throws IOException {
       // needed in IndexSorter#{Long|Int|Double|Float}Sorter
       docID = target;
-      return disi == null || disi.setDocId(target);
+      if (disi == null) {
+        return true;
+      }
+      disi.setDocId(target);
+      return bits.get(target);
     }
 
     @Override
@@ -253,7 +257,7 @@ class NumericDocValuesWriter extends DocValuesWriter<NumericDocValues> {
     @Override
     public long cost() {
       if (cost == -1) {
-        cost = bits == null ? values.length : bits.cardinality();
+        cost = disi == null ? values.length : disi.cost();
       }
       return cost;
     }

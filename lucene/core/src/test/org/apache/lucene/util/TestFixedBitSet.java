@@ -815,6 +815,87 @@ public class TestFixedBitSet extends BaseBitSetTestCase<FixedBitSet> {
     assertEquals(63, iter.nextDoc());
   }
 
+  public void testBitSetIteratorSetDocIdSparse() throws IOException {
+    // Same scenario but against SparseFixedBitSet to exercise the non-FixedBitSet path
+    // (words == null in BitSetIterator).
+    SparseFixedBitSet bitSet = new SparseFixedBitSet(300);
+    bitSet.set(5);
+    bitSet.set(10);
+    bitSet.set(63);
+    bitSet.set(64);
+    bitSet.set(200);
+
+    BitSetIterator iter = new BitSetIterator(bitSet, bitSet.cardinality());
+
+    iter.setDocId(5);
+    assertEquals(10, iter.nextDoc());
+    assertEquals(63, iter.nextDoc());
+
+    iter.setDocId(63);
+    assertEquals(64, iter.nextDoc());
+    assertEquals(200, iter.nextDoc());
+    assertEquals(DocIdSetIterator.NO_MORE_DOCS, iter.nextDoc());
+
+    iter.setDocId(-1);
+    assertEquals(5, iter.nextDoc());
+
+    iter.setDocId(10);
+    assertEquals(200, iter.advance(100));
+
+    iter.setDocId(7);
+    assertEquals(10, iter.nextDoc());
+  }
+
+  public void testBitSetIteratorRandomized() throws IOException {
+    // Cross-check the FixedBitSet fast path in BitSetIterator against the SparseFixedBitSet
+    // path (which goes through the BitSet#nextSetBit / get methods). Both must produce
+    // identical observable behavior for any legal sequence of operations.
+    Random random = random();
+    int outerIters = atLeast(20);
+    for (int outer = 0; outer < outerIters; outer++) {
+      int numBits = TestUtil.nextInt(random, 1, 5_000);
+      FixedBitSet fixed = new FixedBitSet(numBits);
+      SparseFixedBitSet sparse = new SparseFixedBitSet(numBits);
+      // Density varies per iteration to exercise dense, sparse, and empty cases.
+      int oneIn = TestUtil.nextInt(random, 1, 64);
+      for (int i = 0; i < numBits; i++) {
+        if (random.nextInt(oneIn) == 0) {
+          fixed.set(i);
+          sparse.set(i);
+        }
+      }
+      assertEquals(fixed.cardinality(), sparse.cardinality());
+
+      BitSetIterator fast = new BitSetIterator(fixed, fixed.cardinality());
+      BitSetIterator slow = new BitSetIterator(sparse, sparse.cardinality());
+
+      int ops = TestUtil.nextInt(random, 1, 500);
+      for (int op = 0; op < ops; op++) {
+        // After exhaustion, the only legal operation is setDocId (calling nextDoc/advance
+        // post-NO_MORE_DOCS is undefined behavior per DocIdSetIterator).
+        int choice = slow.docID() == DocIdSetIterator.NO_MORE_DOCS ? 2 : random.nextInt(3);
+        switch (choice) {
+          case 0 -> // nextDoc
+              assertEquals(slow.nextDoc(), fast.nextDoc());
+          case 1 -> {
+            // advance to a target strictly greater than the current doc
+            int current = slow.docID();
+            int maxStep = Math.max(1, numBits - current);
+            int target = current + 1 + random.nextInt(maxStep);
+            assertEquals(slow.advance(target), fast.advance(target));
+          }
+          case 2 -> {
+            // setDocId to anywhere in [-1, numBits - 1]; both iterators reset identically
+            int pos = random.nextInt(numBits + 1) - 1;
+            slow.setDocId(pos);
+            fast.setDocId(pos);
+            assertEquals(slow.docID(), fast.docID());
+          }
+        }
+      }
+    }
+  }
+
   public void testIntoArray() throws Exception {
     for (int outerIter = 0; outerIter < 100; outerIter++) {
       int numBits = TestUtil.nextInt(random(), 10, 1_000);
