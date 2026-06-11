@@ -25,11 +25,10 @@ import org.apache.lucene.tests.util.TestUtil;
 
 public class TestLoserTree extends LuceneTestCase {
 
-  // Each leaf is an int[]{sourceIndex, currentValue}; tree comparator uses currentValue.
+  // Each leaf is an int[]{sourceIndex, currentValue}; key = currentValue.
   private static LoserTree<int[]> buildTree(int[][] leafRefs) {
-    LoserTree<int[]> tree =
-        LoserTree.usingComparator(leafRefs.length, (a, b) -> Integer.compare(a[1], b[1]));
-    for (int[] leaf : leafRefs) tree.add(leaf);
+    LoserTree<int[]> tree = LoserTree.create(leafRefs.length);
+    for (int[] leaf : leafRefs) tree.add(leaf[1], leaf);
     return tree;
   }
 
@@ -69,9 +68,9 @@ public class TestLoserTree extends LuceneTestCase {
       result.add(champ[1]);
       int src = champ[0];
       int nextVal = pos[src] < sources[src].length ? sources[src][pos[src]++] : Integer.MAX_VALUE;
-      // Mutate the champion element in-place and use the no-arg updateTop.
+      // Mutate the champion element in-place and use updateTop with the new key.
       champ[1] = nextVal;
-      tree.updateTop();
+      tree.updateTop(nextVal);
     }
 
     List<Integer> expected = new ArrayList<>();
@@ -83,15 +82,18 @@ public class TestLoserTree extends LuceneTestCase {
   // ---- single leaf (degenerate tree) -----------------------------------------------
 
   public void testSingleLeaf() {
-    LoserTree<Integer> tree = LoserTree.usingComparator(1, Integer::compare);
-    tree.add(42);
+    LoserTree<Integer> tree = LoserTree.create(1);
+    tree.add(42, 42);
     assertEquals(Integer.valueOf(42), tree.top());
+    assertEquals(42, tree.topKey());
 
-    tree.updateTop(7);
+    tree.updateTop(7, 7);
     assertEquals(Integer.valueOf(7), tree.top());
+    assertEquals(7, tree.topKey());
 
-    tree.updateTop(Integer.MAX_VALUE);
+    tree.updateTop(Integer.MAX_VALUE, Integer.MAX_VALUE);
     assertEquals(Integer.valueOf(Integer.MAX_VALUE), tree.top());
+    assertEquals(Integer.MAX_VALUE, tree.topKey());
   }
 
   // ---- all-equal values ------------------------------------------------------------
@@ -105,12 +107,13 @@ public class TestLoserTree extends LuceneTestCase {
 
     // All values equal — champion should be the first leaf (smallest index wins ties).
     assertEquals(trueMin(mirror), tree.top()[1]);
+    assertEquals(0, tree.top()[0]); // leaf 0 wins
 
     // Replace champion with a larger value; new champion should still be some leaf with value 3.
     int[] champ = tree.top();
     champ[1] = 99;
     mirror[champ[0]] = 99;
-    tree.updateTop();
+    tree.updateTop(99); // in-place: element already mutated, pass new key
     assertEquals(trueMin(mirror), tree.top()[1]);
   }
 
@@ -123,6 +126,7 @@ public class TestLoserTree extends LuceneTestCase {
     LoserTree<int[]> tree = buildTree(leafRefs);
     // Every leaf is a sentinel — top should be MAX_VALUE.
     assertEquals(Integer.MAX_VALUE, tree.top()[1]);
+    assertEquals(Integer.MAX_VALUE, tree.topKey());
   }
 
   public void testSomeExhaustedSources() {
@@ -139,29 +143,29 @@ public class TestLoserTree extends LuceneTestCase {
     // Advance leaf 2 to exhausted
     int[] champ = tree.top();
     champ[1] = Integer.MAX_VALUE;
-    tree.updateTop();
+    tree.updateTop(Integer.MAX_VALUE);
     assertEquals(5, tree.top()[1]); // leaf 0 (value 5) is now champion
 
     // Advance leaf 0 to exhausted
     champ = tree.top();
     champ[1] = Integer.MAX_VALUE;
-    tree.updateTop();
+    tree.updateTop(Integer.MAX_VALUE);
     assertEquals(Integer.MAX_VALUE, tree.top()[1]); // all exhausted
   }
 
-  // ---- updateTop(newTop) variant (replaces champion element) -----------------------
+  // ---- updateTop(key, newElement) variant (replaces champion element) ---------------
 
   public void testUpdateTopReplacement() {
     int[][] leafRefs = {new int[] {0, 10}, new int[] {1, 20}, new int[] {2, 30}};
     LoserTree<int[]> tree = buildTree(leafRefs);
     assertEquals(10, tree.top()[1]);
 
-    // Replace champion with a new object carrying value 15 (still loses to 20 and 30).
-    tree.updateTop(new int[] {0, 15});
+    // Replace champion with a new object carrying value 15 (still wins against 20 and 30).
+    tree.updateTop(15, new int[] {0, 15});
     assertEquals(15, tree.top()[1]);
 
-    // Replace with 25 (loses to 30, beats... nothing below, but 20 should now be champion).
-    tree.updateTop(new int[] {0, 25});
+    // Replace with 25 — 20 should now be champion.
+    tree.updateTop(25, new int[] {0, 25});
     assertEquals(20, tree.top()[1]);
   }
 
@@ -175,10 +179,11 @@ public class TestLoserTree extends LuceneTestCase {
     tree.clear();
     assertEquals(0, tree.size());
     assertNull(tree.top());
+    assertEquals(-1, tree.topKey());
 
     // Re-add with different values
     int[][] newRefs = {new int[] {0, 9}, new int[] {1, 1}, new int[] {2, 4}};
-    for (int[] leaf : newRefs) tree.add(leaf);
+    for (int[] leaf : newRefs) tree.add(leaf[1], leaf);
     assertEquals(1, tree.top()[1]);
   }
 
@@ -188,8 +193,7 @@ public class TestLoserTree extends LuceneTestCase {
     // A single instance sized to a fixed capacity, reused for rounds with fewer active leaves.
     // This mirrors the per-term postings merge, where the number of subs varies per term.
     int capacity = 8;
-    LoserTree<int[]> tree =
-        LoserTree.usingComparator(capacity, (a, b) -> Integer.compare(a[1], b[1]));
+    LoserTree<int[]> tree = LoserTree.create(capacity);
 
     for (int activeLeaves : new int[] {3, 1, 8, 0, 5, 2}) {
       tree.reset(activeLeaves);
@@ -198,17 +202,19 @@ public class TestLoserTree extends LuceneTestCase {
       if (activeLeaves == 0) {
         // No leaves contested: nothing is built and there is no champion.
         assertNull(tree.top());
+        assertEquals(-1, tree.topKey());
         continue;
       }
 
       int[] expected = new int[activeLeaves];
       for (int i = 0; i < activeLeaves; i++) {
         int val = random().nextInt(1000);
-        tree.add(new int[] {i, val});
+        tree.add(val, new int[] {i, val});
         expected[i] = val;
       }
       Arrays.sort(expected);
       assertEquals(expected[0], tree.top()[1]);
+      assertEquals(expected[0], tree.topKey());
     }
   }
 
@@ -246,16 +252,16 @@ public class TestLoserTree extends LuceneTestCase {
       while (true) {
         int[] champ = tree.top();
         assertNotNull("top() should not be null once built", champ);
-        assertEquals("top()[1] must equal the true min of all leaves", trueMin(mirror), champ[1]);
+        assertEquals("top() key must equal the true min of all leaves", trueMin(mirror), champ[1]);
+        assertEquals("topKey() must match top()[1]", champ[1], tree.topKey());
         if (champ[1] == Integer.MAX_VALUE) break;
         result.add(champ[1]);
         int src = champ[0];
         int nextVal = pos[src] < sources[src].length ? sources[src][pos[src]++] : Integer.MAX_VALUE;
-        // Use the in-place mutation + no-arg updateTop path.
-        int champIdx = src; // champ[0] == src
+        // Use the in-place mutation + updateTop(key) path.
         champ[1] = nextVal;
-        mirror[champIdx] = nextVal;
-        tree.updateTop();
+        mirror[src] = nextVal;
+        tree.updateTop(nextVal);
       }
 
       assertEquals("merged result must match globally sorted values", allValues, result);
@@ -277,6 +283,7 @@ public class TestLoserTree extends LuceneTestCase {
     int steps = atLeast(500);
     for (int s = 0; s < steps; s++) {
       assertEquals(trueMin(currentVals), tree.top()[1]);
+      assertEquals(trueMin(currentVals), tree.topKey());
 
       int[] champ = tree.top();
       int src = champ[0];
@@ -284,13 +291,13 @@ public class TestLoserTree extends LuceneTestCase {
       currentVals[src] = newVal;
 
       if (random().nextBoolean()) {
-        // In-place mutation path
+        // In-place mutation path: mutate element, pass new key
         champ[1] = newVal;
-        tree.updateTop();
+        tree.updateTop(newVal);
       } else {
-        // Replacement path
+        // Replacement path: new element + new key
         int[] newLeaf = new int[] {src, newVal};
-        tree.updateTop(newLeaf);
+        tree.updateTop(newVal, newLeaf);
         leafRefs[src] = newLeaf; // keep leafRefs consistent (used for src lookup)
       }
     }
@@ -311,6 +318,7 @@ public class TestLoserTree extends LuceneTestCase {
       Arrays.sort(expected);
       // Champion should be the global minimum.
       assertEquals(expected[0], tree.top()[1]);
+      assertEquals(expected[0], tree.topKey());
     }
   }
 }
