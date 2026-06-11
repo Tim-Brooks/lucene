@@ -20,25 +20,25 @@ import java.util.Arrays;
 import java.util.Comparator;
 
 /**
- * A tournament (loser) tree for k-way merging. Each internal node stores the index of the loser
- * of the match played at that node; the current winner (minimum element) is tracked separately as
- * the champion.
+ * A tournament (loser) tree for k-way merging. Each internal node stores the index of the loser of
+ * the match played at that node; the current winner (minimum element) is tracked separately as the
+ * champion.
  *
  * <p>After all leaves are filled via {@link #add}, replaying after the champion advances costs at
  * most &lceil;log&#8322;(k)&rceil; comparisons (the depth of the champion's leaf, which is
- * &lfloor;log&#8322;(k)&rfloor; or &lceil;log&#8322;(k)&rceil; depending on the leaf) — roughly half
- * the cost of a binary heap — because the leaf-to-root path is fixed and requires no child-vs-child
- * comparisons. The traversal path is also data-independent, which is friendlier to branch prediction
- * and cache than a heap sift-down.
+ * &lfloor;log&#8322;(k)&rfloor; or &lceil;log&#8322;(k)&rceil; depending on the leaf) — roughly
+ * half the cost of a binary heap — because the leaf-to-root path is fixed and requires no
+ * child-vs-child comparisons. The traversal path is also data-independent, which is friendlier to
+ * branch prediction and cache than a heap sift-down.
  *
- * <p>Usage: call {@link #add} once per leaf (leaves 0..numLeaves-1 in order) until the tree is
- * full (size == numLeaves), then alternate between reading {@link #top} and advancing via {@link
+ * <p>Usage: call {@link #add} once per leaf (leaves 0..numLeaves-1 in order) until the tree is full
+ * (size == numLeaves), then alternate between reading {@link #top} and advancing via {@link
  * #updateTop} or {@link #updateTop(Object)}.
  *
  * <p>The arrays are sized once to a fixed <i>capacity</i> at construction. The number of leaves
  * actually contested can be smaller and may vary between rounds: call {@link #reset(int)} to set a
- * new active leaf count (&le; capacity) and start a fresh {@link #add} cycle, which is what allows a
- * single instance to be reused across many merges of differing arity (e.g. per-term postings
+ * new active leaf count (&le; capacity) and start a fresh {@link #add} cycle, which is what allows
+ * a single instance to be reused across many merges of differing arity (e.g. per-term postings
  * merges). The active count defaults to the full capacity.
  *
  * <p>Exhausted inputs should be represented by a sentinel element that compares greater than every
@@ -153,8 +153,8 @@ public final class LoserTree<T> {
   }
 
   /**
-   * Returns the minimum element (the champion), or {@code null} if the tree is not yet built.
-   * Valid only after all {@code numLeaves} elements have been added via {@link #add}.
+   * Returns the minimum element (the champion), or {@code null} if the tree is not yet built. Valid
+   * only after all {@code numLeaves} elements have been added via {@link #add}.
    */
   public T top() {
     return champion >= 0 ? leaves[champion] : null;
@@ -190,7 +190,8 @@ public final class LoserTree<T> {
    *
    * <p>Algorithm: insert leaves 0..n-1 one by one, walking each leaf up to the root. Each internal
    * node stores the loser of its first contested match; the overall winner ends up in {@code
-   * champion}. Build is O(n) amortized (each node is contested at most twice across all insertions).
+   * champion}. Build is O(n) amortized (each node is contested at most twice across all
+   * insertions).
    */
   private void build() {
     int n = numLeaves;

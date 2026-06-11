@@ -246,15 +246,11 @@ public class TestLoserTree extends LuceneTestCase {
       while (true) {
         int[] champ = tree.top();
         assertNotNull("top() should not be null once built", champ);
-        assertEquals(
-            "top()[1] must equal the true min of all leaves",
-            trueMin(mirror),
-            champ[1]);
+        assertEquals("top()[1] must equal the true min of all leaves", trueMin(mirror), champ[1]);
         if (champ[1] == Integer.MAX_VALUE) break;
         result.add(champ[1]);
         int src = champ[0];
-        int nextVal =
-            pos[src] < sources[src].length ? sources[src][pos[src]++] : Integer.MAX_VALUE;
+        int nextVal = pos[src] < sources[src].length ? sources[src][pos[src]++] : Integer.MAX_VALUE;
         // Use the in-place mutation + no-arg updateTop path.
         int champIdx = src; // champ[0] == src
         champ[1] = nextVal;
