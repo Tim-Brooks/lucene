@@ -144,11 +144,14 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
         throw new IllegalArgumentException();
       }
       this.subs = subs;
-      // One leaf per non-current sub; sized to subs.size()-1 since subs is fixed across resets.
-      int treeSize = Math.max(0, subs.size() - 1);
+      // One leaf per non-current sub. Sized once to the maximum (maxCount-1, since one sub is
+      // always held out as `current`); the active leaf count is set per reset() to match the
+      // current subs list, which lets this instance be reused across postings merges whose arity
+      // varies per term.
+      int capacity = maxCount - 1;
       tree =
           LoserTree.usingComparator(
-              treeSize,
+              capacity,
               (a, b) -> {
                 // mappedDocIDs are globally unique across subs; the only legal tie is between
                 // exhausted (NO_MORE_DOCS) leaves, which are kept in the tree as permanent losers.
@@ -168,7 +171,9 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
 
     @Override
     public void reset() throws IOException {
-      tree.clear();
+      // Active leaves = all subs except the one held out as `current`. May vary per reset when
+      // this merger is reused (e.g. per-term postings merges).
+      tree.reset(Math.max(0, subs.size() - 1));
       current = null;
       boolean first = true;
       for (T sub : subs) {

@@ -35,6 +35,12 @@ import java.util.Comparator;
  * (size == numLeaves), then alternate between reading {@link #top} and advancing via {@link
  * #updateTop} or {@link #updateTop(Object)}.
  *
+ * <p>The arrays are sized once to a fixed <i>capacity</i> at construction. The number of leaves
+ * actually contested can be smaller and may vary between rounds: call {@link #reset(int)} to set a
+ * new active leaf count (&le; capacity) and start a fresh {@link #add} cycle, which is what allows
+ * a single instance to be reused across many merges of differing arity (e.g. per-term postings
+ * merges). The active count defaults to the full capacity.
+ *
  * <p>Exhausted inputs should be represented by a sentinel element that compares greater than every
  * real element (e.g. {@link Integer#MAX_VALUE} or {@code DocIdSetIterator.NO_MORE_DOCS}). Such
  * sentinels become permanent losers and are never surfaced as the champion.
@@ -59,22 +65,34 @@ public final class LoserTree<T> {
   /** Number of leaves added so far via {@link #add}. */
   private int size;
 
+  /**
+   * Number of leaves contested in the current round. Always {@code <= leaves.length} (the
+   * capacity). The tournament is built once {@code size == numLeaves}, and {@link #build}, {@link
+   * #replay} and {@link #top} all operate over {@code leaves[0..numLeaves-1]}.
+   */
+  private int numLeaves;
+
   @SuppressWarnings("unchecked")
-  private LoserTree(int numLeaves, Comparator<? super T> comparator) {
-    if (numLeaves < 0) {
-      throw new IllegalArgumentException("numLeaves must be >= 0; got: " + numLeaves);
+  private LoserTree(int capacity, Comparator<? super T> comparator) {
+    if (capacity < 0) {
+      throw new IllegalArgumentException("capacity must be >= 0; got: " + capacity);
     }
     this.comparator = comparator;
-    this.leaves = (T[]) new Object[numLeaves];
-    // Index 0 unused; indices 1..numLeaves-1 are internal loser nodes (n-1 nodes for n leaves).
-    this.tree = numLeaves > 0 ? new int[numLeaves] : new int[0];
+    this.leaves = (T[]) new Object[capacity];
+    // Index 0 unused; indices 1..capacity-1 are internal loser nodes (n-1 nodes for n leaves).
+    this.tree = new int[capacity];
     this.champion = -1;
     this.size = 0;
+    this.numLeaves = capacity;
   }
 
-  /** Creates a loser tree ordered by the provided comparator. */
-  public static <T> LoserTree<T> usingComparator(int numLeaves, Comparator<? super T> comparator) {
-    return new LoserTree<>(numLeaves, comparator);
+  /**
+   * Creates a loser tree ordered by the provided comparator. {@code capacity} is the maximum number
+   * of leaves; the active leaf count defaults to {@code capacity} and can be lowered per round with
+   * {@link #reset(int)}.
+   */
+  public static <T> LoserTree<T> usingComparator(int capacity, Comparator<? super T> comparator) {
+    return new LoserTree<>(capacity, comparator);
   }
 
   /**
@@ -85,7 +103,7 @@ public final class LoserTree<T> {
    */
   public void add(T element) {
     leaves[size++] = element;
-    if (size == leaves.length) {
+    if (size == numLeaves) {
       build();
     }
   }
@@ -95,9 +113,31 @@ public final class LoserTree<T> {
     return size;
   }
 
-  /** Resets to empty, ready for fresh {@link #add} calls (e.g. for a {@code reset()} cycle). */
+  /**
+   * Resets to empty, keeping the current active leaf count, ready for a fresh {@link #add} cycle.
+   */
   public void clear() {
-    Arrays.fill(leaves, null);
+    Arrays.fill(leaves, 0, numLeaves, null);
+    size = 0;
+    champion = -1;
+  }
+
+  /**
+   * Resets to empty and sets a new active leaf count for the next {@link #add} cycle. Use this to
+   * reuse a single instance across rounds whose arity differs (the arrays are sized once to the
+   * capacity passed at construction).
+   *
+   * @param numLeaves the number of leaves that will be added this round; must be in {@code [0,
+   *     capacity]}
+   */
+  public void reset(int numLeaves) {
+    if (numLeaves < 0 || numLeaves > leaves.length) {
+      throw new IllegalArgumentException(
+          "numLeaves must be in [0, " + leaves.length + "]; got: " + numLeaves);
+    }
+    // Null out whichever range was previously active to release references.
+    Arrays.fill(leaves, 0, Math.max(this.numLeaves, numLeaves), null);
+    this.numLeaves = numLeaves;
     size = 0;
     champion = -1;
   }
@@ -144,7 +184,7 @@ public final class LoserTree<T> {
    * insertions).
    */
   private void build() {
-    int n = leaves.length;
+    int n = numLeaves;
     if (n == 1) {
       champion = 0;
       return;
@@ -185,7 +225,7 @@ public final class LoserTree<T> {
    * reaching the root becomes the new champion.
    */
   private void replay() {
-    int n = leaves.length;
+    int n = numLeaves;
     if (n <= 1) {
       return; // 0 or 1 leaf: nothing to replay
     }
