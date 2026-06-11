@@ -182,6 +182,36 @@ public class TestLoserTree extends LuceneTestCase {
     assertEquals(1, tree.top()[1]);
   }
 
+  // ---- reuse across rounds of differing arity via reset(int) -----------------------
+
+  public void testResetVaryingLeafCount() {
+    // A single instance sized to a fixed capacity, reused for rounds with fewer active leaves.
+    // This mirrors the per-term postings merge, where the number of subs varies per term.
+    int capacity = 8;
+    LoserTree<int[]> tree =
+        LoserTree.usingComparator(capacity, (a, b) -> Integer.compare(a[1], b[1]));
+
+    for (int activeLeaves : new int[] {3, 1, 8, 0, 5, 2}) {
+      tree.reset(activeLeaves);
+      assertEquals(0, tree.size());
+
+      if (activeLeaves == 0) {
+        // No leaves contested: nothing is built and there is no champion.
+        assertNull(tree.top());
+        continue;
+      }
+
+      int[] expected = new int[activeLeaves];
+      for (int i = 0; i < activeLeaves; i++) {
+        int val = random().nextInt(1000);
+        tree.add(new int[] {i, val});
+        expected[i] = val;
+      }
+      Arrays.sort(expected);
+      assertEquals(expected[0], tree.top()[1]);
+    }
+  }
+
   // ---- randomized k-way merge against sorted reference (main oracle test) ----------
 
   public void testRandomMerge() {
