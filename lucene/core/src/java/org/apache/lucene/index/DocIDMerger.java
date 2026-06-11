@@ -22,7 +22,7 @@ import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 import java.io.IOException;
 import java.util.List;
 import org.apache.lucene.search.DocIdSetIterator; // javadocs
-import org.apache.lucene.util.PriorityQueue;
+import org.apache.lucene.util.LoserTree;
 
 /**
  * Utility class to help merging documents from sub-readers according to either simple concatenated
@@ -136,7 +136,7 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
 
     private final List<T> subs;
     private T current;
-    private final PriorityQueue<T> queue;
+    private final LoserTree<T> tree;
     private int queueMinDocID;
 
     private SortedDocIDMerger(List<T> subs, int maxCount) throws IOException {
@@ -144,19 +144,23 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
         throw new IllegalArgumentException();
       }
       this.subs = subs;
-      queue =
-          PriorityQueue.usingComparator(
-              maxCount - 1,
+      // One leaf per non-current sub; sized to subs.size()-1 since subs is fixed across resets.
+      int treeSize = Math.max(0, subs.size() - 1);
+      tree =
+          LoserTree.usingComparator(
+              treeSize,
               (a, b) -> {
-                assert a.mappedDocID != b.mappedDocID;
+                // mappedDocIDs are globally unique across subs; the only legal tie is between
+                // exhausted (NO_MORE_DOCS) leaves, which are kept in the tree as permanent losers.
+                assert a.mappedDocID != b.mappedDocID || a.mappedDocID == NO_MORE_DOCS;
                 return Integer.compare(a.mappedDocID, b.mappedDocID);
               });
       reset();
     }
 
     private void setQueueMinDocID() {
-      if (queue.size() > 0) {
-        queueMinDocID = queue.top().mappedDocID;
+      if (tree.size() > 0) {
+        queueMinDocID = tree.top().mappedDocID;
       } else {
         queueMinDocID = DocIdSetIterator.NO_MORE_DOCS;
       }
@@ -164,20 +168,23 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
 
     @Override
     public void reset() throws IOException {
-      // caller may not have fully consumed the queue:
-      queue.clear();
+      tree.clear();
       current = null;
       boolean first = true;
       for (T sub : subs) {
         if (first) {
-          // by setting mappedDocID = -1, this entry is guaranteed to be the top of the queue
-          // so the first call to next() will advance it
+          // by setting mappedDocID = -1, this entry is guaranteed to win the first fast-path
+          // check so the first call to next() will advance it
           sub.mappedDocID = -1;
           current = sub;
           first = false;
-        } else if (sub.nextMappedDoc() != NO_MORE_DOCS) {
-          queue.add(sub);
-        } // else all docs in this sub were deleted; do not add it to the queue!
+        } else {
+          // Advance the sub (may be NO_MORE_DOCS for all-deleted segments); add it as a leaf
+          // regardless so the tree is always fully populated. NO_MORE_DOCS subs become
+          // permanent losers and are never surfaced as the champion.
+          sub.nextMappedDoc();
+          tree.add(sub);
+        }
       }
       setQueueMinDocID();
     }
@@ -191,23 +198,24 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
         return current;
       }
 
-      if (nextDoc == NO_MORE_DOCS) {
-        if (queue.size() == 0) {
-          current = null;
-        } else {
-          current = queue.pop();
-        }
-      } else {
-        // queue cannot be empty here: if it were, queueMinDocID == NO_MORE_DOCS, and any valid
-        // nextDoc would satisfy nextDoc < queueMinDocID, taking the fast path above
-        assert queueMinDocID == queue.top().mappedDocID;
-        assert nextDoc > queueMinDocID;
-        T newCurrent = queue.top();
-        queue.updateTop(current);
-        current = newCurrent;
+      if (tree.size() == 0) {
+        // No other subs — current (now exhausted) is the only one.
+        current = null;
+        return null;
       }
 
+      // Slow path: current lost the race (its nextDoc >= tree minimum) or is exhausted.
+      // Swap current into the tree and surface the tree's champion as the new current.
+      // If current is NO_MORE_DOCS it becomes a permanent loser; termination is detected
+      // uniformly below.
+      T newCurrent = tree.top();
+      tree.updateTop(current);
+      current = newCurrent;
       setQueueMinDocID();
+      if (current.mappedDocID == NO_MORE_DOCS) {
+        current = null;
+        return null;
+      }
       return current;
     }
   }
