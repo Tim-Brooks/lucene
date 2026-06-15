@@ -149,21 +149,15 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
       // current subs list, which lets this instance be reused across postings merges whose arity
       // varies per term.
       int capacity = maxCount - 1;
-      tree =
-          LoserTree.usingComparator(
-              capacity,
-              (a, b) -> {
-                // mappedDocIDs are globally unique across subs; the only legal tie is between
-                // exhausted (NO_MORE_DOCS) leaves, which are kept in the tree as permanent losers.
-                assert a.mappedDocID != b.mappedDocID || a.mappedDocID == NO_MORE_DOCS;
-                return Integer.compare(a.mappedDocID, b.mappedDocID);
-              });
+      // Keys are mappedDocIDs (non-negative ints or NO_MORE_DOCS); the int-keyed branchless tree
+      // orders by (docID, leafIndex), eliminating data-dependent branches on the replay hot path.
+      tree = LoserTree.create(capacity);
       reset();
     }
 
     private void setQueueMinDocID() {
       if (tree.size() > 0) {
-        queueMinDocID = tree.top().mappedDocID;
+        queueMinDocID = tree.topKey();
       } else {
         queueMinDocID = DocIdSetIterator.NO_MORE_DOCS;
       }
@@ -188,7 +182,7 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
           // regardless so the tree is always fully populated. NO_MORE_DOCS subs become
           // permanent losers and are never surfaced as the champion.
           sub.nextMappedDoc();
-          tree.add(sub);
+          tree.add(sub.mappedDocID, sub);
         }
       }
       setQueueMinDocID();
@@ -202,7 +196,15 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
         // low-cardinality field, or enabled on a field that correlates with index order.
         return current;
       }
+      // The cold path lives in a separate method so next() stays tiny and call-free on the hot
+      // path. That lets C2 inline next() into the merge consumer and keep current/queueMinDocID in
+      // registers, instead of being forced into a call-safe register layout around the
+      // (non-inlined)
+      // updateTop call — which otherwise shows up as hot-path self-time in next().
+      return nextSlow();
+    }
 
+    private T nextSlow() {
       if (tree.size() == 0) {
         // No other subs — current (now exhausted) is the only one.
         current = null;
@@ -214,7 +216,7 @@ public abstract class DocIDMerger<T extends DocIDMerger.Sub> {
       // If current is NO_MORE_DOCS it becomes a permanent loser; termination is detected
       // uniformly below.
       T newCurrent = tree.top();
-      tree.updateTop(current);
+      tree.updateTop(current.mappedDocID, current);
       current = newCurrent;
       setQueueMinDocID();
       if (current.mappedDocID == NO_MORE_DOCS) {
