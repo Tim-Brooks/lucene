@@ -106,16 +106,16 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
     assert firstDocID > lastDocID;
 
     int max = cursor.fillBinaryDocValues(bytesOut, lengths);
+    docsWithField.addRange(firstDocID, firstDocID + numValues);
+    lastDocID = firstDocID + numValues - 1;
+    maxLength = Math.max(maxLength, max);
+    updateBytesUsed();
+
     // TODO: Investigate.
     if (max > MAX_LENGTH) {
       throw new IllegalArgumentException(
           "DocValuesField \"" + fieldInfo.name + "\" is too large, must be <= " + MAX_LENGTH);
     }
-    maxLength = Math.max(maxLength, max);
-    docsWithField.addRange(firstDocID, firstDocID + numValues);
-    updateBytesUsed();
-
-    lastDocID = firstDocID + numValues - 1;
   }
 
   private void updateBytesUsed() {
