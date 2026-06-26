@@ -20,6 +20,7 @@ import static org.apache.lucene.search.DocIdSetIterator.NO_MORE_DOCS;
 
 import java.io.IOException;
 import org.apache.lucene.codecs.DocValuesConsumer;
+import org.apache.lucene.document.column.BytesRefValuesCursor;
 import org.apache.lucene.search.DocIdSetIterator;
 import org.apache.lucene.store.DataInput;
 import org.apache.lucene.store.DataOutput;
@@ -47,7 +48,7 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
 
   private final Counter iwBytesUsed;
   private final PackedLongValues.Builder lengths;
-  private DocsWithFieldSet docsWithField;
+  private final DocsWithFieldSet docsWithField;
   private final FieldInfo fieldInfo;
   private long bytesUsed;
   private int lastDocID = -1;
@@ -95,6 +96,26 @@ class BinaryDocValuesWriter extends DocValuesWriter<BinaryDocValues> {
     updateBytesUsed();
 
     lastDocID = docID;
+  }
+
+  void addDenseValues(int firstDocID, BytesRefValuesCursor cursor) {
+    int numValues = cursor.size();
+    if (numValues == 0) {
+      return;
+    }
+    assert firstDocID > lastDocID;
+
+    int max = cursor.fillBinaryDocValues(bytesOut, lengths);
+    // TODO: Investigate.
+    if (max > MAX_LENGTH) {
+      throw new IllegalArgumentException(
+          "DocValuesField \"" + fieldInfo.name + "\" is too large, must be <= " + MAX_LENGTH);
+    }
+    maxLength = Math.max(maxLength, max);
+    docsWithField.addRange(firstDocID, firstDocID + numValues);
+    updateBytesUsed();
+
+    lastDocID = firstDocID + numValues - 1;
   }
 
   private void updateBytesUsed() {

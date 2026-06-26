@@ -16,6 +16,7 @@
  */
 package org.apache.lucene.document.column;
 
+import java.io.IOException;
 import java.util.List;
 import org.apache.lucene.analysis.TokenStream;
 import org.apache.lucene.document.FieldType;
@@ -24,7 +25,9 @@ import org.apache.lucene.index.IndexableFieldType;
 import org.apache.lucene.index.VectorEncoding;
 import org.apache.lucene.index.VectorSimilarityFunction;
 import org.apache.lucene.search.DocIdSetIterator;
+import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.packed.PackedLongValues;
 
 /** Shared helpers for column-batch indexing tests. */
 public class ColumnBatchTestUtil {
@@ -294,6 +297,24 @@ public class ColumnBatchTestUtil {
           }
           System.arraycopy(packed, consumed * width, dst, offset, length * width);
           consumed += length;
+        }
+
+        @Override
+        public int fillBinaryDocValues(DataOutput bytesOut, PackedLongValues.Builder lengths) {
+          int count = size();
+          if (consumed + count > n) {
+            throw new IllegalStateException("BytesRefValuesCursor exhausted: size=" + n);
+          }
+          try {
+            bytesOut.writeBytes(packed, consumed * width, count * width);
+          } catch (IOException e) {
+            throw new AssertionError(e);
+          }
+          for (int i = 0; i < count; i++) {
+            lengths.add(width);
+          }
+          consumed += count;
+          return width;
         }
       };
     }

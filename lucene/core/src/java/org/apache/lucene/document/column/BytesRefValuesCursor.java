@@ -16,7 +16,10 @@
  */
 package org.apache.lucene.document.column;
 
+import java.io.IOException;
+import org.apache.lucene.store.DataOutput;
 import org.apache.lucene.util.BytesRef;
+import org.apache.lucene.util.packed.PackedLongValues;
 
 /**
  * A values cursor over a dense {@link BinaryColumn}. The cursor produces exactly {@link #size()}
@@ -26,8 +29,8 @@ import org.apache.lucene.util.BytesRef;
  * #size()} times. The returned {@link BytesRef} is valid only until the next call to {@link
  * #nextValue()}.
  *
- * <p>Combined consumption across {@link #nextValue()} and {@link #fillPackedPoints} must not exceed
- * {@link #size()}.
+ * <p>Combined consumption across {@link #nextValue()}, {@link #fillPackedPoints}, and {@link
+ * #fillBinaryDocValues} must not exceed {@link #size()}.
  *
  * @lucene.experimental
  */
@@ -40,9 +43,8 @@ public abstract class BytesRefValuesCursor {
    * {@code [0, size)}. {@code size} is fixed for the cursor's lifetime and must equal the dense
    * column's {@code numDocs}.
    *
-   * <p>Lucene's internal indexing paths will not consume past {@code size} across {@link
-   * #nextValue()} and {@link #fillPackedPoints}. Defensive throws on overrun are still encouraged
-   * to catch misuse from external callers.
+   * <p>Lucene's internal indexing paths will not consume past {@code size}. Defensive throws on
+   * overrun are still encouraged to catch misuse from external callers.
    */
   protected BytesRefValuesCursor(int size) {
     this.size = size;
@@ -61,8 +63,7 @@ public abstract class BytesRefValuesCursor {
   /**
    * Bulk-fill {@code length} fixed-width packed point records into {@code dst} starting at byte
    * {@code offset}, advancing the cursor by {@code length}. Each value must be exactly {@code
-   * width} bytes and is passed through unchanged (no sortable encoding). Combined consumption
-   * across {@link #nextValue()} and this method must not exceed {@link #size()}.
+   * width} bytes and is passed through unchanged (no sortable encoding).
    *
    * <p>The default implementation calls {@link #nextValue()} per value and validates each length.
    * Override when the backing data is optimizable (e.g. a contiguous packed array); such overrides
@@ -77,5 +78,30 @@ public abstract class BytesRefValuesCursor {
       }
       System.arraycopy(v.bytes, v.offset, dst, offset + i * width, width);
     }
+  }
+
+  /**
+   * Bulk-fill all {@link #size()} values into a {@link DataOutput} and parallel {@link
+   * PackedLongValues.Builder}, advancing the cursor by {@link #size()}. Returns the maximum value
+   * length encountered, which callers use to pre-grow read buffers.
+   *
+   * <p>The default implementation calls {@link #nextValue()} per value. Override when the backing
+   * data is optimizable (e.g. a contiguous byte array); such overrides take responsibility for
+   * writing exactly {@link #size()} values and returning the correct maximum length.
+   */
+  public int fillBinaryDocValues(DataOutput bytesOut, PackedLongValues.Builder lengths) {
+    int maxLength = 0;
+    for (int i = 0; i < size(); i++) {
+      BytesRef v = nextValue();
+      lengths.add(v.length);
+      try {
+        bytesOut.writeBytes(v.bytes, v.offset, v.length);
+      } catch (IOException ioe) {
+        // Should never happen!
+        throw new RuntimeException(ioe);
+      }
+      maxLength = Math.max(maxLength, v.length);
+    }
+    return maxLength;
   }
 }

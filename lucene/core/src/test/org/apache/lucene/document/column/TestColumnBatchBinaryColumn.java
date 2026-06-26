@@ -901,4 +901,62 @@ public class TestColumnBatchBinaryColumn extends LuceneTestCase {
     wBulk.close();
     dirBulk.close();
   }
+
+  public void testDenseBinaryDocValues() throws IOException {
+    // ArrayDenseBinaryColumn with BINARY DV: exercises addDenseValues → default fillBinaryDocValues.
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    BytesRef[] values = {newBytesRef("a"), newBytesRef("bb"), newBytesRef("ccc")};
+    w.addBatch(simpleBatch(values.length, new ArrayDenseBinaryColumn("bin", BinaryDocValuesField.TYPE, values)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    BinaryDocValues dv = leaf.getBinaryDocValues("bin");
+    for (int i = 0; i < values.length; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(values[i], dv.binaryValue());
+    }
+    assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.nextDoc());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
+
+  public void testDenseBinaryDocValuesContiguousFill() throws IOException {
+    // ContiguousDenseBinaryColumn with BINARY DV: exercises the fillBinaryDocValues override.
+    Directory dir = newDirectory();
+    IndexWriter w = new IndexWriter(dir, newIndexWriterConfig());
+
+    final int width = Integer.BYTES;
+    final int n = 5;
+    byte[] packed = new byte[n * width];
+    BytesRef[] expected = new BytesRef[n];
+    for (int i = 0; i < n; i++) {
+      int v = (i + 1) * 111;
+      packed[i * width] = (byte) (v >> 24);
+      packed[i * width + 1] = (byte) (v >> 16);
+      packed[i * width + 2] = (byte) (v >> 8);
+      packed[i * width + 3] = (byte) v;
+      byte[] copy = new byte[width];
+      System.arraycopy(packed, i * width, copy, 0, width);
+      expected[i] = new BytesRef(copy);
+    }
+
+    w.addBatch(simpleBatch(n, new ContiguousDenseBinaryColumn("bin", BinaryDocValuesField.TYPE, packed, width)));
+
+    DirectoryReader r = DirectoryReader.open(w);
+    LeafReader leaf = getOnlyLeafReader(r);
+    BinaryDocValues dv = leaf.getBinaryDocValues("bin");
+    for (int i = 0; i < n; i++) {
+      assertEquals(i, dv.nextDoc());
+      assertEquals(expected[i], dv.binaryValue());
+    }
+    assertEquals(DocIdSetIterator.NO_MORE_DOCS, dv.nextDoc());
+
+    r.close();
+    w.close();
+    dir.close();
+  }
 }

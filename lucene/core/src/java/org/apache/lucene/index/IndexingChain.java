@@ -1181,9 +1181,7 @@ final class IndexingChain implements Accountable {
       switch (dvType) {
         case BINARY -> {
           BinaryDocValuesWriter writer = (BinaryDocValuesWriter) pf.docValuesWriter;
-          for (int i = 0; i < dvCursor.size(); i++) {
-            writer.addValue(baseDocID + i, dvCursor.nextValue());
-          }
+          writer.addDenseValues(baseDocID, dvCursor);
         }
         case SORTED -> {
           SortedDocValuesWriter writer = (SortedDocValuesWriter) pf.docValuesWriter;
